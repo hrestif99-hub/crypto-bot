@@ -13,7 +13,8 @@ COINBASE_API_URL = "https://api.coinbase.com"
 def get_jwt_token(api_key_name, private_key_pem, method, path):
     """Genere un token JWT pour l API Coinbase Advanced."""
     uri = f"{method} api.coinbase.com{path}"
-    private_key = load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
+    pem_clean = private_key_pem.replace("\\n", "\n")
+    private_key = load_pem_private_key(pem_clean.encode("utf-8"), password=None)
     payload = {
         "sub": api_key_name,
         "iss": "cdp",
