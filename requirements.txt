@@ -1,0 +1,6 @@
+python-telegram-bot
+aiohttp
+PyJWT
+cryptography
+requests
+schedule
