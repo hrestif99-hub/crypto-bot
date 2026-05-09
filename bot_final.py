@@ -15,7 +15,8 @@ from coinbase import (
 )
 from trader import (
     add_trade, update_trade_peak, should_sell, close_trade,
-    get_active_trades, get_closed_trades, get_trade_summary
+    get_active_trades, get_closed_trades, get_trade_summary,
+    increment_stop_confirmation, reset_stop_confirmation
 )
 
 # ─── Configuration ───────────────────────────────────────────
@@ -24,21 +25,18 @@ CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 if not CHAT_ID:
     CHAT_ID = "8746800281"
 print(f"DEBUG CHAT_ID: '{CHAT_ID}'")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-COINBASE_API_KEY = os.environ.get("COINBASE_API_KEY", "")
+ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+COINBASE_API_KEY    = os.environ.get("COINBASE_API_KEY", "")
 COINBASE_API_SECRET = os.environ.get("COINBASE_API_SECRET", "")
 
-STOP_LOSS_PCT = -25.0
-TRAILING_STOP_PCT = 15.0
-MIN_SIGNAL_SCORE = 4        # Minimum 4/6 signaux pour alerter
-MAX_AMOUNT_EUR = 50.0       # Maximum par trade
-CHECK_INTERVAL = 120        # Verification positions toutes les 2 min
-SCANNER_INTERVAL = 3600     # Scan toutes les heures
+# Parametres globaux (les valeurs par trade sont maintenant dans signals.py)
+CHECK_INTERVAL       = 120    # Surveillance positions toutes les 2 min
+SCANNER_INTERVAL     = 3600   # Scan toutes les heures
 NEW_LISTINGS_INTERVAL = 1800
 
-POSITIONS_FILE = "positions.json"
+POSITIONS_FILE     = "positions.json"
 SEEN_LISTINGS_FILE = "seen_listings.json"
-PENDING_BUYS_FILE = "pending_buys.json"
+PENDING_BUYS_FILE  = "pending_buys.json"
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -62,13 +60,13 @@ def save_positions(positions):
 def add_manual_position(coin, amount_eur, entry_price, date=None):
     positions = load_positions()
     coin = coin.upper()
-    key = f"{coin}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    key  = f"{coin}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     positions[key] = {
-        "coin": coin,
-        "amount_eur": amount_eur,
+        "coin":        coin,
+        "amount_eur":  amount_eur,
         "entry_price": entry_price,
-        "quantity": amount_eur / entry_price,
-        "date": date or datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "quantity":    amount_eur / entry_price,
+        "date":        date or datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     save_positions(positions)
     return key, positions[key]
@@ -90,9 +88,9 @@ def add_pending(product_id, symbol, analysis):
     pending = load_pending()
     pending[product_id] = {
         "product_id": product_id,
-        "symbol": symbol,
-        "analysis": analysis,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+        "symbol":     symbol,
+        "analysis":   analysis,
+        "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M")
     }
     save_pending(pending)
 
@@ -113,7 +111,7 @@ def save_seen_listings(seen):
         json.dump(seen, f)
 
 
-# ─── Prix CoinGecko (pour positions manuelles) ───────────────
+# ─── Prix CoinGecko (positions manuelles) ────────────────────
 
 COIN_IDS = {
     "BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin",
@@ -124,19 +122,22 @@ COIN_IDS = {
 }
 
 async def get_coingecko_prices(coins):
-    ids = [COIN_IDS.get(c.upper(), c.lower()) for c in coins]
+    ids     = [COIN_IDS.get(c.upper(), c.lower()) for c in coins]
     ids_str = ",".join(set(ids))
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_str}&vs_currencies=eur&include_24hr_change=true"
+    url     = (
+        f"https://api.coingecko.com/api/v3/simple/price"
+        f"?ids={ids_str}&vs_currencies=eur&include_24hr_change=true"
+    )
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                data = await r.json()
+                data   = await r.json()
                 result = {}
                 for coin in coins:
                     coin_id = COIN_IDS.get(coin.upper(), coin.lower())
                     if coin_id in data:
                         result[coin.upper()] = {
-                            "price": data[coin_id]["eur"],
+                            "price":     data[coin_id]["eur"],
                             "change_24h": data[coin_id].get("eur_24h_change", 0)
                         }
                 return result
@@ -145,10 +146,13 @@ async def get_coingecko_prices(coins):
         return {}
 
 
-# ─── Score solidite projet ────────────────────────────────────
+# ─── Score solidité projet (nouvelles listings) ───────────────
 
 async def get_coin_details(coin_id):
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&community_data=true&developer_data=true"
+    url = (
+        f"https://api.coingecko.com/api/v3/coins/{coin_id}"
+        f"?localization=false&tickers=false&community_data=true&developer_data=true"
+    )
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
@@ -162,42 +166,33 @@ async def get_coin_details(coin_id):
 def score_project(details):
     if not details:
         return 0, [], []
-    score = 0
-    signaux = []
-    alertes = []
+    score, signaux, alertes = 0, [], []
     if details.get("links", {}).get("homepage", [None])[0]:
-        score += 1
-        signaux.append("Site web present")
+        score += 1; signaux.append("Site web present")
     else:
         alertes.append("Pas de site web")
     if details.get("links", {}).get("whitepaper"):
-        score += 1
-        signaux.append("Whitepaper present")
+        score += 1; signaux.append("Whitepaper present")
     else:
         alertes.append("Pas de whitepaper")
     dev = details.get("developer_data", {})
     if dev.get("commit_count_4_weeks", 0) > 0:
-        score += 2
-        signaux.append(f"GitHub actif ({dev['commit_count_4_weeks']} commits/mois)")
+        score += 2; signaux.append(f"GitHub actif ({dev['commit_count_4_weeks']} commits/mois)")
     else:
         alertes.append("GitHub inactif")
-    community = details.get("community_data", {})
-    twitter = community.get("twitter_followers", 0) or 0
+    twitter = (details.get("community_data", {}).get("twitter_followers", 0) or 0)
     if twitter > 10000:
-        score += 1
-        signaux.append(f"Twitter : {twitter:,} followers")
+        score += 1; signaux.append(f"Twitter : {twitter:,} followers")
     else:
         alertes.append(f"Peu de followers ({twitter})")
     market_cap = details.get("market_data", {}).get("market_cap", {}).get("eur", 0) or 0
     if market_cap > 100000:
-        score += 1
-        signaux.append(f"Market cap : {market_cap:,.0f} EUR")
+        score += 1; signaux.append(f"Market cap : {market_cap:,.0f} EUR")
     else:
         alertes.append("Market cap tres faible")
     desc = details.get("description", {}).get("en", "")
     if desc and len(desc) > 100:
-        score += 1
-        signaux.append("Projet decrit")
+        score += 1; signaux.append("Projet decrit")
     else:
         alertes.append("Pas de description")
     return round(score), signaux, alertes
@@ -251,6 +246,86 @@ Si montant en USD, multiplie par 0.92. UNIQUEMENT le JSON."""
         return None
 
 
+# ─── Construction des messages Telegram ──────────────────────
+
+def build_opportunity_message(symbol, analysis):
+    """
+    Construit le message Telegram selon le profil du coin.
+
+    STANDARD      : message classique, infos de base
+    ULTRA VOLATILE: message étendu avec ATR, OBV, Squeeze + avertissement risque
+    """
+    barre   = "|" * analysis["score"] + "." * (analysis["score_max"] - analysis["score"])
+    is_uv   = analysis.get("is_ultra_volatile", False)
+    atr     = analysis.get("atr_pct")
+    squeeze = analysis.get("bollinger_squeeze", False)
+    obv_up  = analysis.get("obv_haussier", False)
+    obv_acc = analysis.get("obv_acceleration", 0)
+
+    signaux_str = "\n".join(f"+ {s}" for s in analysis["signaux"])
+    alertes_str = (
+        "\n\nAlertes :\n" + "\n".join(f"! {a}" for a in analysis["alertes"])
+        if analysis["alertes"] else ""
+    )
+
+    if is_uv:
+        # ── Message ULTRA VOLATILE ────────────────────────────
+        nb_uv      = analysis.get("nb_criteres_uv", 0)
+        atr_label  = f"{atr:.1f}%" if atr else "N/A"
+        obv_label  = (
+            f"Haussier fort (acc. {obv_acc:.2f})" if obv_up and obv_acc > 0.1
+            else "Haussier" if obv_up
+            else "Baissier"
+        )
+        squeeze_label = "OUI — explosion imminente !" if squeeze else "Non"
+
+        msg = (
+            f"ULTRA VOLATILE — OPPORTUNITE DETECTEE\n"
+            f"{'=' * 34}\n\n"
+            f"Crypto : {symbol}\n"
+            f"Prix   : {analysis['price']:,.6f} EUR\n"
+            f"Score  : {analysis['score']}/{analysis['score_max']} [{barre}] {analysis['niveau']}\n"
+            f"Criteres UV : {nb_uv}/3 valides\n\n"
+            f"--- Indicateurs volatilite ---\n"
+            f"ATR (mouvement moyen/bougie) : {atr_label}  {'OK' if atr and atr > 6 else '--'}\n"
+            f"OBV (accumulation)           : {obv_label}  {'OK' if obv_up else '--'}\n"
+            f"Bollinger Squeeze            : {squeeze_label}  {'OK' if squeeze else '--'}\n\n"
+            f"--- Signaux ---\n"
+            f"{signaux_str}"
+            f"{alertes_str}\n\n"
+            f"Variation 24h : {analysis['change_24h']:+.1f}%\n"
+            f"Variation 3j  : {analysis['change_72h']:+.1f}%\n"
+            f"Volume        : x{analysis['volume_ratio']:.1f} vs moyenne\n\n"
+            f"--- Regles automatiques pour ce trade ---\n"
+            f"Stop loss     : {analysis['stop_loss_pct']}%  (plus large — coin tres volatile)\n"
+            f"Trailing stop : -{analysis['trailing_stop_pct']}% depuis le pic\n"
+            f"Montant MAX   : {analysis['montant_max_eur']:.0f} EUR\n\n"
+            f"RISQUE ELEVE — Ce coin peut faire -30% en quelques heures\n"
+            f"avant de repartir. Ne mets pas plus de {analysis['montant_max_eur']:.0f} EUR.\n\n"
+            f"Veux-tu acheter ?"
+        )
+    else:
+        # ── Message STANDARD ──────────────────────────────────
+        msg = (
+            f"OPPORTUNITE DETECTEE\n\n"
+            f"Crypto : {symbol}\n"
+            f"Prix   : {analysis['price']:,.4f} EUR\n"
+            f"Score  : {analysis['score']}/{analysis['score_max']} [{barre}] {analysis['niveau']}\n\n"
+            f"Signaux :\n"
+            f"{signaux_str}"
+            f"{alertes_str}\n\n"
+            f"Variation 24h : {analysis['change_24h']:+.1f}%\n"
+            f"Variation 3j  : {analysis['change_72h']:+.1f}%\n"
+            f"Volume        : x{analysis['volume_ratio']:.1f} vs moyenne\n\n"
+            f"Stop loss : {analysis['stop_loss_pct']}%  |  "
+            f"Trailing : -{analysis['trailing_stop_pct']}%  |  "
+            f"Max : {analysis['montant_max_eur']:.0f} EUR\n\n"
+            f"Veux-tu acheter ?"
+        )
+
+    return msg
+
+
 # ─── Surveillance des trades actifs ──────────────────────────
 
 async def monitor_trades(app):
@@ -260,15 +335,26 @@ async def monitor_trades(app):
 
     for key, trade in trades.items():
         try:
-            product_id = trade["product_id"]
+            product_id    = trade["product_id"]
             current_price = await get_product_price(product_id, COINBASE_API_KEY, COINBASE_API_SECRET)
             if not current_price or current_price <= 0:
                 continue
 
             update_trade_peak(key, current_price)
-            sell, reason = should_sell(trade, current_price)
+            decision, reason = should_sell(trade, current_price)
 
-            if sell:
+            if decision == "PENDING_STOP":
+                # ULTRA VOLATILE : stop atteint mais attend confirmation
+                count = increment_stop_confirmation(key)
+                logger.info(f"[monitor] {trade['symbol']} PENDING_STOP confirmation {count}/2 — {reason}")
+                # On ne vend pas encore, on attend le prochain cycle (2 min)
+                continue
+
+            # Si le prix est remonté au-dessus du stop, on remet le compteur à zéro
+            if not decision and trade.get("stop_loss_confirmations", 0) > 0:
+                reset_stop_confirmation(key)
+
+            if decision is True:
                 success, order_id, _ = await place_market_sell(
                     COINBASE_API_KEY, COINBASE_API_SECRET,
                     product_id, trade["quantity"]
@@ -276,14 +362,15 @@ async def monitor_trades(app):
                 if success:
                     pnl_pct, pnl_eur = close_trade(key, current_price, reason)
                     signe = "+" if pnl_eur >= 0 else ""
+                    profil = "ULTRA VOLATILE" if trade.get("is_ultra_volatile") else "STANDARD"
                     msg = (
                         f"VENTE AUTOMATIQUE\n\n"
-                        f"Crypto : {trade['symbol']}\n"
-                        f"Raison : {reason}\n"
-                        f"Prix entree : {trade['entry_price']:,.4f} EUR\n"
-                        f"Prix vente : {current_price:,.4f} EUR\n"
+                        f"Crypto  : {trade['symbol']}  [{profil}]\n"
+                        f"Raison  : {reason}\n"
+                        f"Entree  : {trade['entry_price']:,.4f} EUR\n"
+                        f"Vente   : {current_price:,.4f} EUR\n"
                         f"Investi : {trade['amount_eur']:.2f} EUR\n"
-                        f"P&L : {signe}{pnl_eur:.2f} EUR ({signe}{pnl_pct:.1f}%)\n"
+                        f"P&L     : {signe}{pnl_eur:.2f} EUR ({signe}{pnl_pct:.1f}%)\n"
                         f"Pic atteint : +{trade['peak_pct']:.1f}%"
                     )
                     await app.bot.send_message(chat_id=CHAT_ID, text=msg)
@@ -299,27 +386,35 @@ async def monitor_trades(app):
 # ─── Scanner opportunites ─────────────────────────────────────
 
 async def scan_opportunities(app):
-    # Normalise : Application.bot → Bot, Bot.bot → User (bug), donc on détecte le type
     bot = app.bot if hasattr(app, 'run_polling') else app
     try:
         products = await get_available_products(COINBASE_API_KEY, COINBASE_API_SECRET)
         if not products:
             return
 
-        # Limiter aux 50 premiers par volume pour eviter trop d appels API
         products = [p for p in products if p.get("quote_currency_id") == "EUR"]
-        products = sorted(products, key=lambda x: float(x.get("volume_24h", 0) or 0), reverse=True)[:150]
+        products = sorted(
+            products,
+            key=lambda x: float(x.get("volume_24h", 0) or 0),
+            reverse=True
+        )[:150]
 
         opportunities = []
         for product in products:
             product_id = product.get("product_id", "?")
-            symbol = product.get("base_currency_id", "?")
+            symbol     = product.get("base_currency_id", "?")
+            volume_24h = float(product.get("volume_24h", 0) or 0)
             try:
-                analysis = await analyze_signals(product_id, COINBASE_API_KEY, COINBASE_API_SECRET)
+                # On passe le volume_24h pour la detection ULTRA VOLATILE
+                analysis = await analyze_signals(
+                    product_id, COINBASE_API_KEY, COINBASE_API_SECRET,
+                    volume_24h=volume_24h
+                )
                 if not analysis:
                     continue
 
-                if analysis["score"] >= MIN_SIGNAL_SCORE:
+                # Seuil d'alerte adapte au profil (4 pour STANDARD, 5 pour ULTRA VOLATILE)
+                if analysis["score"] >= analysis["min_score_alerte"]:
                     opportunities.append((product_id, symbol, analysis))
             except Exception as e:
                 logger.error(f"[scan_opportunities] {product_id} : {e}", exc_info=True)
@@ -330,29 +425,14 @@ async def scan_opportunities(app):
         for product_id, symbol, analysis in opportunities:
             try:
                 add_pending(product_id, symbol, analysis)
-                barre = "|" * analysis["score"] + "." * (analysis["score_max"] - analysis["score"])
 
-                keyboard = [
-                    [
-                        InlineKeyboardButton("Oui, acheter", callback_data=f"buy_yes_{product_id}"),
-                        InlineKeyboardButton("Non", callback_data=f"buy_no_{product_id}")
-                    ]
-                ]
+                keyboard = [[
+                    InlineKeyboardButton("Oui, acheter", callback_data=f"buy_yes_{product_id}"),
+                    InlineKeyboardButton("Non",          callback_data=f"buy_no_{product_id}")
+                ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
-                msg = (
-                    f"OPPORTUNITE DETECTEE\n\n"
-                    f"Crypto : {symbol}\n"
-                    f"Prix : {analysis['price']:,.4f} EUR\n"
-                    f"Score : {analysis['score']}/{analysis['score_max']} [{barre}] {analysis['niveau']}\n\n"
-                    f"Signaux :\n" +
-                    "\n".join(f"+ {s}" for s in analysis["signaux"]) +
-                    ("\n\nAlertes :\n" + "\n".join(f"! {a}" for a in analysis["alertes"]) if analysis["alertes"] else "") +
-                    f"\n\nVariation 24h : {analysis['change_24h']:+.1f}%\n"
-                    f"Variation 3j : {analysis['change_72h']:+.1f}%\n"
-                    f"Volume : x{analysis['volume_ratio']:.1f} vs moyenne\n\n"
-                    f"Veux-tu acheter ?"
-                )
+                msg = build_opportunity_message(symbol, analysis)
 
                 await bot.send_message(
                     chat_id=CHAT_ID,
@@ -383,7 +463,7 @@ async def check_new_listings(app):
                 except json.JSONDecodeError:
                     return
 
-        seen = load_seen_listings()
+        seen     = load_seen_listings()
         new_ones = [c for c in coins if c.get("id") and c["id"] not in seen]
 
         for coin in new_ones[:3]:
@@ -391,12 +471,12 @@ async def check_new_listings(app):
             details = await get_coin_details(coin["id"])
             score, signaux, alertes = score_project(details)
             niveau = "SOLIDE" if score >= 5 else "MOYEN" if score >= 3 else "RISQUE"
-            barre = "|" * score + "." * (7 - score)
+            barre  = "|" * score + "." * (7 - score)
 
             msg = (
                 f"NOUVELLE CRYPTO LISTEE\n\n"
-                f"Nom : {coin.get('name', '?')} ({coin.get('symbol', '?').upper()})\n"
-                f"Score solidite : {score}/7 [{barre}] {niveau}\n\n"
+                f"Nom   : {coin.get('name', '?')} ({coin.get('symbol', '?').upper()})\n"
+                f"Score : {score}/7 [{barre}] {niveau}\n\n"
             )
             if signaux:
                 msg += "Points positifs :\n" + "\n".join(f"+ {s}" for s in signaux) + "\n\n"
@@ -433,22 +513,32 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         ctx.user_data["pending_buy"] = product_id
+        analysis  = pending[product_id]["analysis"]
+        montant_max = analysis.get("montant_max_eur", 50.0)
+        is_uv     = analysis.get("is_ultra_volatile", False)
+        warning   = "\nATTENTION : coin ultra volatile, reste sous {:.0f}€ !".format(montant_max) if is_uv else ""
+
         await query.edit_message_text(
-            query.message.text + f"\n\nCombien d euros veux-tu investir ? (max {MAX_AMOUNT_EUR}€)\nReponds avec un nombre."
+            query.message.text
+            + f"\n\nCombien d euros veux-tu investir ? (max {montant_max:.0f}€)\n"
+            + "Reponds avec un nombre."
+            + warning
         )
 
     elif data.startswith("confirm_buy_"):
-        parts = data.split("_")
+        parts      = data.split("_")
         product_id = parts[2]
-        amount = float(parts[3])
+        amount     = float(parts[3])
 
         pending = load_pending()
         if product_id not in pending:
             await query.edit_message_text("Cette opportunite a expire.")
             return
 
-        info = pending[product_id]
-        symbol = info["symbol"]
+        info     = pending[product_id]
+        symbol   = info["symbol"]
+        analysis = info["analysis"]
+        is_uv    = analysis.get("is_ultra_volatile", False)
 
         await query.edit_message_text(f"Achat de {amount}€ de {symbol} en cours...")
 
@@ -468,23 +558,36 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     )
                 )
                 return
+
             quantity = amount / current_price
-            key, trade = add_trade(product_id, symbol, amount, current_price, quantity, order_id)
+
+            # On passe le profil et les parametres adaptes a add_trade
+            key, trade = add_trade(
+                product_id, symbol, amount, current_price, quantity, order_id,
+                is_ultra_volatile=is_uv,
+                stop_loss_pct=analysis.get("stop_loss_pct"),
+                trailing_stop_pct=analysis.get("trailing_stop_pct"),
+            )
             remove_pending(product_id)
 
-            await ctx.bot.send_message(
-                chat_id=CHAT_ID,
-                text=(
-                    f"ACHAT CONFIRME\n\n"
-                    f"Crypto : {symbol}\n"
-                    f"Montant : {amount:.2f} EUR\n"
-                    f"Prix : {current_price:,.4f} EUR\n"
-                    f"Quantite : {quantity:.6f}\n"
-                    f"ID trade : {key}\n\n"
-                    f"Trailing stop : -{TRAILING_STOP_PCT}% depuis pic\n"
-                    f"Stop loss : {STOP_LOSS_PCT}%"
-                )
+            profil = "ULTRA VOLATILE" if is_uv else "STANDARD"
+            msg = (
+                f"ACHAT CONFIRME\n\n"
+                f"Crypto   : {symbol}  [{profil}]\n"
+                f"Montant  : {amount:.2f} EUR\n"
+                f"Prix     : {current_price:,.6f} EUR\n"
+                f"Quantite : {quantity:.6f}\n"
+                f"ID trade : {key}\n\n"
+                f"Stop loss     : {analysis.get('stop_loss_pct', -25):.0f}%\n"
+                f"Trailing stop : -{analysis.get('trailing_stop_pct', 15):.0f}% depuis le pic\n"
             )
+            if is_uv:
+                msg += (
+                    f"\nCoin ultra volatile : le stop loss\n"
+                    f"ne se declenchera qu'apres 2 confirmations\n"
+                    f"consecutives (anti-wick)."
+                )
+            await ctx.bot.send_message(chat_id=CHAT_ID, text=msg)
         else:
             await ctx.bot.send_message(
                 chat_id=CHAT_ID,
@@ -504,9 +607,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if amount <= 0:
                 await update.message.reply_text("Le montant doit etre positif.")
                 return
-            if amount > MAX_AMOUNT_EUR:
-                await update.message.reply_text(f"Maximum {MAX_AMOUNT_EUR}€ par trade.")
-                return
 
             pending = load_pending()
             if product_id not in pending:
@@ -514,22 +614,35 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 del ctx.user_data["pending_buy"]
                 return
 
-            info = pending[product_id]
-            symbol = info["symbol"]
-            price = info["analysis"]["price"]
+            info       = pending[product_id]
+            symbol     = info["symbol"]
+            analysis   = info["analysis"]
+            price      = analysis["price"]
+            montant_max = analysis.get("montant_max_eur", 50.0)
+            is_uv      = analysis.get("is_ultra_volatile", False)
 
+            if amount > montant_max:
+                await update.message.reply_text(
+                    f"Maximum {montant_max:.0f}€ pour ce coin"
+                    + (" (ultra volatile — risque eleve)." if is_uv else ".")
+                )
+                return
+
+            profil = "ULTRA VOLATILE" if is_uv else "STANDARD"
             keyboard = [[
                 InlineKeyboardButton(f"Confirmer {amount}€", callback_data=f"confirm_buy_{product_id}_{amount}"),
-                InlineKeyboardButton("Annuler", callback_data=f"buy_no_{product_id}")
+                InlineKeyboardButton("Annuler",              callback_data=f"buy_no_{product_id}")
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(
                 f"Confirmer l achat ?\n\n"
-                f"Crypto : {symbol}\n"
-                f"Montant : {amount:.2f} EUR\n"
-                f"Prix actuel : {price:,.4f} EUR\n"
-                f"Quantite estimee : {amount/price:.6f} {symbol}",
+                f"Crypto   : {symbol}  [{profil}]\n"
+                f"Montant  : {amount:.2f} EUR\n"
+                f"Prix     : {price:,.6f} EUR\n"
+                f"Quantite : {amount / price:.6f} {symbol}\n\n"
+                f"Stop loss     : {analysis.get('stop_loss_pct', -25):.0f}%\n"
+                f"Trailing stop : -{analysis.get('trailing_stop_pct', 15):.0f}% depuis le pic",
                 reply_markup=reply_markup
             )
             del ctx.user_data["pending_buy"]
@@ -544,49 +657,45 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = (
         "Agent de Trading Crypto\n\n"
         "Commandes :\n\n"
-        "/recap — Resume complet\n"
+        "/recap       — Resume complet\n"
         "/portefeuille — Ton solde Coinbase\n"
-        "/scanner — Scan manuel opportunites\n"
-        "/nouveautes — Nouvelles cryptos listees\n"
+        "/scanner     — Scan manuel opportunites\n"
+        "/nouveautes  — Nouvelles cryptos listees\n"
         "/buy BTC 500 65000 — Position manuelle\n"
-        "/prix BTC ETH SOL — Prix actuels\n"
-        "/historique — Tes trades passes\n\n"
+        "/prix BTC ETH SOL  — Prix actuels\n"
+        "/historique  — Tes trades passes\n\n"
         "Ou envoie un screenshot de ton trade !\n\n"
-        f"Stop loss : {STOP_LOSS_PCT}% | Trailing stop : -{TRAILING_STOP_PCT}% depuis pic\n"
-        f"Score minimum pour alerte : {MIN_SIGNAL_SCORE}/6"
+        "Profils de trading :\n"
+        "STANDARD      : stop -25%  | trailing -15% | max 50 EUR\n"
+        "ULTRA VOLATILE: stop -35%  | trailing dynamique | max 15 EUR\n\n"
+        "Le profil est detecte automatiquement selon la volatilite du coin."
     )
     await update.message.reply_text(msg)
 
 async def cmd_portefeuille(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Recuperation de ton portefeuille Coinbase...")
     try:
-        portfolio = await get_portfolio(COINBASE_API_KEY, COINBASE_API_SECRET)
+        portfolio   = await get_portfolio(COINBASE_API_KEY, COINBASE_API_SECRET)
         eur_balance = portfolio.get("EUR", 0)
-
         if not portfolio:
             await update.message.reply_text("Impossible de recuperer le portefeuille.")
             return
-
-        msg = "TON PORTEFEUILLE COINBASE\n\n"
+        msg  = "TON PORTEFEUILLE COINBASE\n\n"
         msg += f"EUR disponible : {eur_balance:.2f} EUR\n\n"
-
         for currency, balance in portfolio.items():
             if currency != "EUR" and balance > 0:
                 msg += f"{currency} : {balance:.6f}\n"
-
     except Exception as e:
         msg = f"Erreur : {e}"
-
     await update.message.reply_text(msg)
 
 async def cmd_recap(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Calcul en cours...")
 
-    # Trades automatiques actifs
     active_trades = get_active_trades()
-    summary = get_trade_summary()
+    summary       = get_trade_summary()
 
-    msg = "RECAP COMPLET\n"
+    msg  = "RECAP COMPLET\n"
     msg += f"{datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
     msg += "─────────────────\n\n"
 
@@ -597,67 +706,68 @@ async def cmd_recap(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 trade["product_id"], COINBASE_API_KEY, COINBASE_API_SECRET
             )
             entry_price = trade["entry_price"]
+            profil      = "UV" if trade.get("is_ultra_volatile") else "STD"
             if current_price and entry_price:
-                pct = ((current_price - entry_price) / entry_price) * 100
-                pnl = (current_price - entry_price) * trade["quantity"]
+                pct    = ((current_price - entry_price) / entry_price) * 100
+                pnl    = (current_price - entry_price) * trade["quantity"]
                 statut = "EN GAIN" if pct >= 0 else "EN PERTE"
                 msg += (
-                    f"{trade['symbol']} — {statut}\n"
-                    f"Entree : {entry_price:,.4f} EUR\n"
-                    f"Actuel : {current_price:,.4f} EUR\n"
-                    f"P&L : {pnl:+.2f} EUR ({pct:+.1f}%)\n"
-                    f"Pic : +{trade['peak_pct']:.1f}%\n\n"
+                    f"{trade['symbol']} [{profil}] — {statut}\n"
+                    f"Entree  : {entry_price:,.4f} EUR\n"
+                    f"Actuel  : {current_price:,.4f} EUR\n"
+                    f"P&L     : {pnl:+.2f} EUR ({pct:+.1f}%)\n"
+                    f"Pic     : +{trade['peak_pct']:.1f}%\n"
+                    f"Stop    : {trade['stop_loss_pct']}%  "
+                    f"Trailing : -{trade['trailing_stop_pct']}%\n\n"
                 )
             else:
                 msg += (
-                    f"{trade['symbol']} — prix indisponible\n"
+                    f"{trade['symbol']} [{profil}] — prix indisponible\n"
                     f"Entree : {entry_price:,.4f} EUR\n"
-                    f"Pic : +{trade['peak_pct']:.1f}%\n\n"
+                    f"Pic    : +{trade['peak_pct']:.1f}%\n\n"
                 )
             await asyncio.sleep(0.3)
 
-    # Positions manuelles
     positions = load_positions()
     if positions:
         msg += "POSITIONS MANUELLES\n\n"
-        coins = list(set(p["coin"] for p in positions.values()))
+        coins  = list(set(p["coin"] for p in positions.values()))
         prices = await get_coingecko_prices(coins)
-
-        total_investi = 0
-        total_actuel = 0
+        total_investi = total_actuel = 0
 
         for key, pos in positions.items():
-            coin = pos["coin"]
-            info = prices.get(coin, {})
-            current = info.get("price", 0)
+            coin       = pos["coin"]
+            info       = prices.get(coin, {})
+            current    = info.get("price", 0)
             change_24h = info.get("change_24h", 0)
-            pct = ((current - pos["entry_price"]) / pos["entry_price"] * 100) if current else 0
-            val = pos["quantity"] * current if current else 0
-            pnl = val - pos["amount_eur"]
-            statut = "EN GAIN" if pct >= 0 else "EN PERTE"
-
+            pct        = ((current - pos["entry_price"]) / pos["entry_price"] * 100) if current else 0
+            val        = pos["quantity"] * current if current else 0
+            pnl        = val - pos["amount_eur"]
+            statut     = "EN GAIN" if pct >= 0 else "EN PERTE"
             msg += (
                 f"{coin} — {statut}\n"
                 f"Entree : {pos['entry_price']:,.4f} EUR\n"
                 f"Actuel : {current:,.4f} EUR\n"
-                f"24h : {change_24h:+.1f}%\n"
-                f"Perf : {pct:+.1f}% | P&L : {pnl:+.2f} EUR\n\n"
+                f"24h    : {change_24h:+.1f}%\n"
+                f"Perf   : {pct:+.1f}% | P&L : {pnl:+.2f} EUR\n\n"
             )
             total_investi += pos["amount_eur"]
-            total_actuel += val
+            total_actuel  += val
 
         total_pnl = total_actuel - total_investi
         total_pct = (total_pnl / total_investi * 100) if total_investi else 0
         msg += f"Total positions : {total_pnl:+.2f} EUR ({total_pct:+.1f}%)\n\n"
 
-    # Bilan global
     msg += "─────────────────\n"
-    msg += f"BILAN GLOBAL\n"
-    msg += f"Trades auto actifs : {summary['active_count']}\n"
-    msg += f"Trades clos : {summary['closed_count']}\n"
-    msg += f"P&L trades clos : {summary['total_pnl_closed']:+.2f} EUR\n"
+    msg += "BILAN GLOBAL\n"
+    msg += f"Trades actifs  : {summary['active_count']}\n"
+    msg += f"Trades clos    : {summary['closed_count']}\n"
+    msg += f"P&L total clos : {summary['total_pnl_closed']:+.2f} EUR\n"
     if summary['closed_count'] > 0:
-        msg += f"Win rate : {summary['winrate']:.0f}% ({summary['wins']}W / {summary['losses']}L)"
+        msg += f"Win rate       : {summary['winrate']:.0f}% ({summary['wins']}W / {summary['losses']}L)\n\n"
+        msg += "Par profil :\n"
+        msg += f"STANDARD       : {summary['standard_count']} trades | P&L {summary['standard_pnl']:+.2f} EUR\n"
+        msg += f"ULTRA VOLATILE : {summary['ultra_count']} trades | P&L {summary['ultra_pnl']:+.2f} EUR\n"
 
     await update.message.reply_text(msg)
 
@@ -678,19 +788,20 @@ async def cmd_historique(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     msg = "HISTORIQUE DES TRADES\n\n"
     for key, trade in list(closed.items())[-10:]:
-        pnl = trade.get("pnl_eur", 0)
-        pct = trade.get("pnl_pct", 0)
+        pnl   = trade.get("pnl_eur", 0)
+        pct   = trade.get("pnl_pct", 0)
         signe = "+" if pnl >= 0 else ""
+        profil = "UV" if trade.get("is_ultra_volatile") else "STD"
         msg += (
-            f"{trade['symbol']} — {trade['date']}\n"
+            f"{trade['symbol']} [{profil}] — {trade['date']}\n"
             f"Entree : {trade['entry_price']:,.4f} | Sortie : {trade.get('sell_price', 0):,.4f}\n"
-            f"P&L : {signe}{pnl:.2f} EUR ({signe}{pct:.1f}%)\n"
+            f"P&L    : {signe}{pnl:.2f} EUR ({signe}{pct:.1f}%)\n"
             f"Raison : {trade.get('sell_reason', '?')}\n\n"
         )
 
     summary = get_trade_summary()
     msg += f"Total P&L : {summary['total_pnl_closed']:+.2f} EUR\n"
-    msg += f"Win rate : {summary['winrate']:.0f}%"
+    msg += f"Win rate  : {summary['winrate']:.0f}%"
     await update.message.reply_text(msg)
 
 async def cmd_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -699,13 +810,13 @@ async def cmd_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage : /buy BTC 500 [prix_optionnel] [date]")
         return
     try:
-        coin = args[0].upper()
+        coin   = args[0].upper()
         amount = float(args[1])
-        date = None
+        date   = None
 
         if len(args) >= 3:
             price = float(args[2])
-            date = args[3] if len(args) > 3 else None
+            date  = args[3] if len(args) > 3 else None
         else:
             product_id = f"{coin}-EUR"
             await update.message.reply_text(f"Recherche du prix {coin} sur Coinbase...")
@@ -729,7 +840,7 @@ async def cmd_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Erreur : montant et prix doivent etre des nombres.")
 
 async def cmd_prix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    coins = [c.upper() for c in ctx.args] if ctx.args else ["BTC", "ETH", "SOL"]
+    coins  = [c.upper() for c in ctx.args] if ctx.args else ["BTC", "ETH", "SOL"]
     prices = await get_coingecko_prices(coins)
     if not prices:
         await update.message.reply_text("Impossible de recuperer les prix.")
@@ -742,7 +853,7 @@ async def cmd_prix(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Screenshot recu ! Analyse en cours...")
     photo = update.message.photo[-1]
-    file = await ctx.bot.get_file(photo.file_id)
+    file  = await ctx.bot.get_file(photo.file_id)
     async with aiohttp.ClientSession() as session:
         async with session.get(file.file_path) as r:
             image_bytes = await r.read()
@@ -802,12 +913,13 @@ async def morning_recap(app):
         if now.hour == 8 and now.minute == 0:
             try:
                 summary = get_trade_summary()
-                active = get_active_trades()
                 msg = (
                     f"RECAP DU MATIN — {now.strftime('%d/%m/%Y')}\n\n"
-                    f"Trades actifs : {summary['active_count']}\n"
+                    f"Trades actifs  : {summary['active_count']}\n"
                     f"P&L total clos : {summary['total_pnl_closed']:+.2f} EUR\n"
-                    f"Win rate : {summary['winrate']:.0f}%\n\n"
+                    f"Win rate       : {summary['winrate']:.0f}%\n\n"
+                    f"STANDARD       : {summary['standard_count']} trades | {summary['standard_pnl']:+.2f} EUR\n"
+                    f"ULTRA VOLATILE : {summary['ultra_count']} trades | {summary['ultra_pnl']:+.2f} EUR\n\n"
                     f"Tape /recap pour le detail complet."
                 )
                 await app.bot.send_message(chat_id=CHAT_ID, text=msg)
@@ -821,16 +933,16 @@ async def morning_recap(app):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_start))
-    app.add_handler(CommandHandler("recap", cmd_recap))
-    app.add_handler(CommandHandler("positions", cmd_recap))
+    app.add_handler(CommandHandler("start",        cmd_start))
+    app.add_handler(CommandHandler("help",         cmd_start))
+    app.add_handler(CommandHandler("recap",        cmd_recap))
+    app.add_handler(CommandHandler("positions",    cmd_recap))
     app.add_handler(CommandHandler("portefeuille", cmd_portefeuille))
-    app.add_handler(CommandHandler("scanner", cmd_scanner))
-    app.add_handler(CommandHandler("nouveautes", cmd_nouveautes))
-    app.add_handler(CommandHandler("historique", cmd_historique))
-    app.add_handler(CommandHandler("buy", cmd_buy))
-    app.add_handler(CommandHandler("prix", cmd_prix))
+    app.add_handler(CommandHandler("scanner",      cmd_scanner))
+    app.add_handler(CommandHandler("nouveautes",   cmd_nouveautes))
+    app.add_handler(CommandHandler("historique",   cmd_historique))
+    app.add_handler(CommandHandler("buy",          cmd_buy))
+    app.add_handler(CommandHandler("prix",         cmd_prix))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
