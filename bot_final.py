@@ -20,7 +20,9 @@ from trader import (
 
 # ─── Configuration ───────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
+CHAT_ID = os.environ.get("CHAT_ID", "").strip()
+if not CHAT_ID:
+    CHAT_ID = "8746800281"
 print(f"DEBUG CHAT_ID: '{CHAT_ID}'")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 COINBASE_API_KEY = os.environ.get("COINBASE_API_KEY", "")
