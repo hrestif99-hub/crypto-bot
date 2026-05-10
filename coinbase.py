@@ -172,8 +172,19 @@ async def place_market_buy(api_key, api_secret, product_id, amount_eur):
         return False, str(e), {}
 
 
+def _round_quantity(qty: float) -> float:
+    """Arrondit une quantite au nombre de decimales accepte par Coinbase (max 8)."""
+    if qty > 1:
+        return round(qty, 4)
+    elif qty > 0.01:
+        return round(qty, 6)
+    else:
+        return round(qty, 8)
+
+
 async def place_market_sell(api_key, api_secret, product_id, quantity):
     path = "/api/v3/brokerage/orders"
+    quantity = _round_quantity(float(quantity))
     order = {
         "client_order_id": f"bot_sell_{int(time.time())}",
         "product_id": product_id,

@@ -377,17 +377,18 @@ async def monitor_trades(app):
 
             if decision is True:
                 is_usdc = product_id.endswith("-USDC")
+                qty_to_sell = round_quantity(trade["quantity"])
                 if is_usdc:
                     success, eur_recupere, sell_price, order_id = await place_market_sell_usdc(
                         COINBASE_API_KEY, COINBASE_API_SECRET,
-                        product_id, trade["quantity"]
+                        product_id, qty_to_sell
                     )
                     if not sell_price:
                         sell_price = current_price
                 else:
                     success, order_id, _ = await place_market_sell(
                         COINBASE_API_KEY, COINBASE_API_SECRET,
-                        product_id, trade["quantity"]
+                        product_id, qty_to_sell
                     )
                     sell_price = current_price
 
