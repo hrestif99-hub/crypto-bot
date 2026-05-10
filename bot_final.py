@@ -396,7 +396,7 @@ async def monitor_trades(app):
                     pnl_pct, pnl_eur = close_trade(key, sell_price, reason)
                     signe  = "+" if pnl_eur >= 0 else ""
                     profil = "ULTRA VOLATILE" if trade.get("is_ultra_volatile") else "STANDARD"
-                    usdc_note = " (USDC→EUR converti auto)" if is_usdc else ""
+                    usdc_note = " (USDC dans le portefeuille)" if is_usdc else ""
                     msg = (
                         f"VENTE AUTOMATIQUE\n\n"
                         f"Crypto  : {trade['symbol']}  [{profil}]\n"
@@ -631,7 +631,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"Vendu   : {quantite:.6f} {symbol}\n"
                     f"Montant : ~{amount_eur:.2f} EUR\n"
                     f"Prix    : {sell_price:,.4f} EUR\n"
-                    + (f"(USDC → EUR converti auto)" if is_usdc else "")
+                    + (f"(USDC dans le portefeuille)" if is_usdc else "")
                 )
             )
         else:
@@ -756,17 +756,6 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Achat de {amount}€ de {symbol} en cours...")
 
         is_usdc_pair = product_id.endswith("-USDC")
-
-        if is_usdc_pair and amount < 5.0:
-            await ctx.bot.send_message(
-                chat_id=CHAT_ID,
-                text=(
-                    f"Montant minimum 5€ pour les paires USDC.\n\n"
-                    f"{symbol} est coté en USDC — la conversion EUR→USDC\n"
-                    f"nécessite au moins 5€ (limite Coinbase)."
-                )
-            )
-            return
 
         if is_usdc_pair:
             # Achat via USDC : conversion EUR→USDC puis achat

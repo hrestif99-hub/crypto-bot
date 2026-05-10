@@ -373,42 +373,30 @@ async def convert_usdc_to_eur(api_key, api_secret, amount_usdc):
         return False, 0.0, order_id
 
 
-async def place_market_buy_usdc(api_key, api_secret, product_id_usdc, amount_eur):
+async def place_market_buy_usdc(api_key, api_secret, product_id_usdc, amount_usdc):
     """
-    Achete un coin paire USDC en convertissant d'abord les EUR en USDC.
+    Achete un coin paire USDC directement depuis le solde USDC disponible.
     product_id_usdc : ex "PEPE-USDC"
-    amount_eur      : montant en euros a investir
+    amount_usdc     : montant en USDC a investir
 
     Retourne (success, quantity, entry_price_usdc, message)
     """
-    if amount_eur < 5.0:
-        return False, 0, 0, "Montant minimum 5 EUR requis pour les paires USDC"
+    # 1. Verifier solde USDC suffisant
+    usdc_balance = await get_usdc_balance(api_key, api_secret)
+    if usdc_balance < amount_usdc:
+        return False, 0, 0, (
+            f"Solde USDC insuffisant ({usdc_balance:.2f} USDC) — "
+            f"convertis tes EUR en USDC sur l'app Coinbase"
+        )
 
-    # 1. Recuperer le prix USDC-EUR pour estimer le montant USDC
-    usdc_eur_price = await get_product_price("USDC-EUR", api_key, api_secret)
-    if not usdc_eur_price:
-        return False, 0, 0, "Prix USDC-EUR introuvable"
-
-    amount_usdc = amount_eur * usdc_eur_price  # EUR → USDC (ex: 15 EUR * 0.92 = 13.8 USDC)
-
-    # 2. Verifier solde EUR suffisant
-    eur_balance = await get_eur_balance(api_key, api_secret)
-    if eur_balance < amount_eur:
-        return False, 0, 0, f"Solde EUR insuffisant ({eur_balance:.2f} EUR)"
-
-    # 3. Convertir EUR → USDC
-    ok, usdc_dispo, _ = await convert_eur_to_usdc(api_key, api_secret, amount_eur)
-    if not ok or usdc_dispo < amount_usdc * 0.95:
-        return False, 0, 0, "Echec conversion EUR → USDC"
-
-    # 4. Acheter le coin avec USDC
+    # 2. Acheter le coin avec USDC
     success, order_id, data = await place_market_buy(
         api_key, api_secret, product_id_usdc, amount_usdc
     )
     if not success:
         return False, 0, 0, order_id
 
-    # 5. Recuperer le prix d'entree
+    # 3. Recuperer le prix d'entree
     import asyncio
     await asyncio.sleep(1)
     entry_price = await get_product_price(product_id_usdc, api_key, api_secret)
@@ -419,10 +407,9 @@ async def place_market_buy_usdc(api_key, api_secret, product_id_usdc, amount_eur
 
 async def place_market_sell_usdc(api_key, api_secret, product_id_usdc, quantity):
     """
-    Vend un coin paire USDC et reconvertit les USDC en EUR automatiquement.
-    Retourne (success, eur_recupere, sell_price, message)
+    Vend un coin paire USDC. Les USDC restent dans le portefeuille.
+    Retourne (success, usdc_obtenu, sell_price, order_id)
     """
-    # 1. Vendre le coin → USDC
     qty_str = _format_quantity(float(quantity))
     logger.info(f"[place_market_sell_usdc] {product_id_usdc} quantite={qty_str}")
     success, order_id, data = await place_market_sell(
@@ -434,16 +421,7 @@ async def place_market_sell_usdc(api_key, api_secret, product_id_usdc, quantity)
     import asyncio
     await asyncio.sleep(1)
 
-    # 2. Recuperer le solde USDC obtenu
-    usdc_balance = await get_usdc_balance(api_key, api_secret)
-    sell_price   = await get_product_price(product_id_usdc, api_key, api_secret)
+    sell_price  = await get_product_price(product_id_usdc, api_key, api_secret)
+    usdc_obtenu = float(quantity) * sell_price if sell_price else 0
 
-    if usdc_balance <= 0:
-        return True, 0, sell_price, "Vente OK mais USDC non detecte — convertis manuellement"
-
-    # 3. Reconvertir USDC → EUR
-    ok, eur_final, _ = await convert_usdc_to_eur(api_key, api_secret, usdc_balance)
-    if not ok:
-        return True, 0, sell_price, f"Vente OK mais conversion USDC→EUR echouee ({usdc_balance:.2f} USDC restants)"
-
-    return True, eur_final, sell_price, order_id
+    return True, usdc_obtenu, sell_price, order_id
