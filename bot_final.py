@@ -275,9 +275,7 @@ def build_opportunity_message(symbol, analysis):
     obv_acc = analysis.get("obv_acceleration", 0)
 
     trending_label = "TOP TRENDING CoinGecko 🔥\n" if analysis.get("is_coingecko_trending") else ""
-    reddit_n       = analysis.get("reddit_mentions", 0)
-    reddit_label   = f"Reddit : {reddit_n} mentions 24h\n" if reddit_n > 20 else ""
-    extra_labels   = trending_label + reddit_label
+    extra_labels   = trending_label
 
     signaux_str = "\n".join(f"+ {s}" for s in analysis["signaux"])
     alertes_str = (

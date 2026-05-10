@@ -279,27 +279,6 @@ async def get_coingecko_trending():
         return []
 
 
-async def get_reddit_mentions(symbol):
-    """Compte les posts Reddit mentionnant le symbol dans les 24h via recherche globale."""
-    url = (
-        f"https://www.reddit.com/search.json"
-        f"?q={symbol}+crypto&sort=new&t=day&limit=100"
-    )
-    headers = {"User-Agent": "crypto-bot/1.0"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
-                raw = await r.read()
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    return 0
-                posts = data.get("data", {}).get("children", [])
-                return len(posts)
-    except Exception as e:
-        logger.error(f"[get_reddit_mentions] {symbol} : {e}")
-        return 0
-
 
 async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_cap=0,
                            trending_symbols=None):
@@ -320,7 +299,6 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
         # ── Donnees externes (trending / Reddit) ──────────────
         symbol                = product_id.split("-")[0].upper()
         is_coingecko_trending = symbol in (trending_symbols or [])
-        reddit_mentions       = await get_reddit_mentions(symbol)
 
         # ── Etape 1 : charge d'abord les bougies 15min ────────
         # On classifie sur 15min directement (Option C)
@@ -603,7 +581,7 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             "is_momentum_alert":   change_24h >= 30,
             # Donnees externes
             "is_coingecko_trending": is_coingecko_trending,
-            "reddit_mentions":       reddit_mentions,
+            "reddit_mentions":       0,
         }
 
     except Exception as e:
