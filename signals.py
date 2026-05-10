@@ -277,35 +277,41 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
       - Detection inactivite + reveil (coin mort qui se reveille = signal fort)
     """
     try:
-        # ── Etape 1 : analyse initiale sur H1 pour classifier ──
+        # ── Etape 1 : charge d'abord les bougies 15min ────────
+        # On classifie sur 15min directement (Option C)
+        # ATR sur 15min est bien plus sensible aux mouvements rapides
+        candles_15 = await get_candles(product_id, api_key, api_secret, granularity="FIFTEEN_MINUTE", limit=100)
         candles_h1 = await get_candles(product_id, api_key, api_secret, granularity="ONE_HOUR", limit=100)
+
         if not candles_h1 or len(candles_h1) < 30:
             return None
 
         candles_h1 = sorted(candles_h1, key=lambda x: x["start"])
-        closes_h1  = [float(c["close"])  for c in candles_h1]
-        volumes_h1 = [float(c["volume"]) for c in candles_h1]
-        highs_h1   = [float(c["high"])   for c in candles_h1]
-        lows_h1    = [float(c["low"])    for c in candles_h1]
+        highs_h1   = [float(c["high"])  for c in candles_h1]
+        lows_h1    = [float(c["low"])   for c in candles_h1]
+        closes_h1  = [float(c["close"]) for c in candles_h1]
 
-        # ATR sur H1 pour la classification UV
-        atr_h1 = calc_atr(highs_h1, lows_h1, closes_h1)
+        # ATR sur 15min pour la classification UV (seuil 4%)
+        # Sur 15min, ATR > 4% = coin qui bouge de 4% par quart d'heure = vraiment explosif
+        if candles_15 and len(candles_15) >= 30:
+            candles_15  = sorted(candles_15, key=lambda x: x["start"])
+            highs_15    = [float(c["high"])  for c in candles_15]
+            lows_15     = [float(c["low"])   for c in candles_15]
+            closes_15   = [float(c["close"]) for c in candles_15]
+            atr_15      = calc_atr(highs_15, lows_15, closes_15)
+        else:
+            atr_15 = None
 
         # Classification UV initiale
-        atr_ultra    = (atr_h1 is not None and atr_h1 > 6.0)
+        # ATR > 4% sur 15min OU volume 24h < 50 000 EUR
+        atr_ultra    = (atr_15 is not None and atr_15 > 4.0)
         volume_micro = (volume_24h > 0 and volume_24h < 50_000)
         candidat_uv  = atr_ultra or volume_micro
 
-        # ── Etape 2 : si candidat UV, recharge en 15min ────────
-        if candidat_uv:
-            # 100 bougies de 15min = 25 heures d'historique recent
-            candles = await get_candles(product_id, api_key, api_secret, granularity="FIFTEEN_MINUTE", limit=100)
-            if not candles or len(candles) < 30:
-                candles = candles_h1  # fallback H1 si 15min indispo
-                timeframe_label = "H1 (15min indispo)"
-            else:
-                candles = sorted(candles, key=lambda x: x["start"])
-                timeframe_label = "15min"
+        # ── Etape 2 : choisir le timeframe d'analyse ───────────
+        if candidat_uv and candles_15 and len(candles_15) >= 30:
+            candles         = candles_15
+            timeframe_label = "15min"
         else:
             candles         = candles_h1
             timeframe_label = "H1"
@@ -360,12 +366,12 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
         is_wakeup, inactivity_pct, spike_ratio = detect_inactivity_wakeup(volumes, closes)
 
         # ── Classification finale ULTRA VOLATILE ──────────────
-        critere_atr     = atr_ultra
+        # ATR > 4% sur 15min obligatoire + au moins 1 autre (OBV ou Squeeze)
+        critere_atr     = atr_ultra  # ATR > 4% sur 15min
         critere_obv     = obv_haussier
         critere_squeeze = is_squeeze
         nb_criteres_uv  = sum([critere_atr, critere_obv, critere_squeeze])
 
-        # ATR > 6% obligatoire + au moins 1 autre (OBV ou Squeeze)
         is_ultra_volatile = critere_atr and (critere_obv or critere_squeeze)
 
         # ── Scoring ───────────────────────────────────────────
@@ -379,12 +385,12 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             # Seuls les signaux pertinents pour les explosions rapides
             score_max = 5
 
-            # 1. ATR > 6%
-            if atr_pct is not None and atr_pct > 6.0:
+            # 1. ATR > 4% sur 15min
+            if atr_15 is not None and atr_15 > 4.0:
                 score += 1
-                signaux.append(f"ATR {atr_pct:.1f}%/bougie ({timeframe_label}) — mouvement rapide possible")
+                signaux.append(f"ATR {atr_15:.1f}%/bougie (15min) — mouvement rapide en cours")
             else:
-                alertes.append(f"ATR faible {atr_pct:.1f}%" if atr_pct else "ATR indisponible")
+                alertes.append(f"ATR faible {atr_15:.1f}% sur 15min" if atr_15 else "ATR indisponible")
 
             # 2. OBV haussier
             if obv_haussier:
