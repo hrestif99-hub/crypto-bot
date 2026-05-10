@@ -20,21 +20,72 @@ def _railway_available():
     return bool(RAILWAY_TOKEN and RAILWAY_PROJECT and RAILWAY_ENV and RAILWAY_SERVICE)
 
 
+def _fetch_railway_variable(name):
+    """Lit une variable Railway via l'API GraphQL en temps reel."""
+    if not _railway_available():
+        return None
+    query = """
+    query variables($projectId: String!, $environmentId: String!, $serviceId: String!) {
+      variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
+    }
+    """
+    variables = {
+        "projectId":     RAILWAY_PROJECT,
+        "environmentId": RAILWAY_ENV,
+        "serviceId":     RAILWAY_SERVICE,
+    }
+    payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://backboard.railway.com/graphql/v2",
+        data=payload,
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {RAILWAY_TOKEN}",
+        },
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            variables_data = result.get("data", {}).get("variables", {})
+            return variables_data.get(name)
+    except Exception as e:
+        logger.error(f"[fetch_railway_variable] Erreur : {e}")
+        return None
+
+
 def load_trades():
     """
     Charge les trades depuis :
-    1. Variable d'environnement TRADES_DATA (Railway — persistant)
-    2. Fichier local trades.json (fallback)
+    1. API Railway en temps reel (persistant entre redeplois)
+    2. Variable d'environnement TRADES_DATA (fallback)
+    3. Fichier local trades.json (fallback final)
     """
-    # Priorite 1 : variable d'environnement (survit aux redeplois)
+    # Priorite 1 : API Railway en temps reel
+    if _railway_available():
+        raw = _fetch_railway_variable("TRADES_DATA")
+        if raw:
+            try:
+                trades = json.loads(raw)
+                # Sync local pour les autres fonctions
+                try:
+                    with open(TRADES_FILE, "w", encoding="utf-8") as f:
+                        json.dump(trades, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+                return trades
+            except json.JSONDecodeError as e:
+                logger.error(f"[load_trades] TRADES_DATA Railway invalide : {e}")
+
+    # Priorite 2 : variable d'environnement au demarrage
     raw = os.environ.get("TRADES_DATA", "")
-    if raw:
+    if raw and raw != "{}":
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            logger.error("[load_trades] TRADES_DATA invalide, fallback fichier")
+            pass
 
-    # Priorite 2 : fichier local
+    # Priorite 3 : fichier local
     if os.path.exists(TRADES_FILE):
         try:
             with open(TRADES_FILE, "r", encoding="utf-8") as f:

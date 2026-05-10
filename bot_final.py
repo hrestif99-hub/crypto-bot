@@ -1111,14 +1111,19 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Commande debug pour verifier que TRADES_DATA est bien lu."""
     import os
-    trades_raw = os.environ.get("TRADES_DATA", "NON DEFINI")
-    trades = get_active_trades()
+    from trader import _railway_available, _fetch_railway_variable
+
+    railway_ok = _railway_available()
+    trades_api = _fetch_railway_variable("TRADES_DATA") if railway_ok else None
+    trades_env = os.environ.get("TRADES_DATA", "NON DEFINI")
+    trades     = get_active_trades()
 
     msg = (
         f"DEBUG\n\n"
-        f"TRADES_DATA defini : {'OUI' if trades_raw != 'NON DEFINI' else 'NON'}\n"
-        f"TRADES_DATA longueur : {len(trades_raw)} caracteres\n"
-        f"TRADES_DATA debut : {trades_raw[:100]}\n\n"
+        f"Railway API dispo : {'OUI' if railway_ok else 'NON'}\n"
+        f"TRADES_DATA via API : {'OUI' if trades_api else 'NON'}\n"
+        f"TRADES_DATA via API longueur : {len(trades_api) if trades_api else 0}\n"
+        f"TRADES_DATA via ENV : {trades_env[:50]}\n\n"
         f"Trades actifs trouves : {len(trades)}\n"
     )
     if trades:
