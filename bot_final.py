@@ -1109,26 +1109,26 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Commande debug pour verifier que TRADES_DATA est bien lu."""
     import os
-    from trader import _railway_available, _fetch_railway_variable
-
-    railway_ok = _railway_available()
-    trades_api = _fetch_railway_variable("TRADES_DATA") if railway_ok else None
-    trades_env = os.environ.get("TRADES_DATA", "NON DEFINI")
-    trades     = get_active_trades()
+    from trader import _railway_available, _fetch_railway_variable, RAILWAY_TOKEN, RAILWAY_PROJECT, RAILWAY_ENV, RAILWAY_SERVICE
 
     msg = (
-        f"DEBUG\n\n"
-        f"Railway API dispo : {'OUI' if railway_ok else 'NON'}\n"
-        f"TRADES_DATA via API : {'OUI' if trades_api else 'NON'}\n"
-        f"TRADES_DATA via API longueur : {len(trades_api) if trades_api else 0}\n"
-        f"TRADES_DATA via ENV : {trades_env[:50]}\n\n"
-        f"Trades actifs trouves : {len(trades)}\n"
+        f"DEBUG VARIABLES\n\n"
+        f"RAILWAY_TOKEN : {'OK (' + RAILWAY_TOKEN[-4:] + ')' if RAILWAY_TOKEN else 'VIDE'}\n"
+        f"RAILWAY_PROJECT : {'OK' if RAILWAY_PROJECT else 'VIDE'} {RAILWAY_PROJECT[:8] if RAILWAY_PROJECT else ''}\n"
+        f"RAILWAY_ENV : {'OK' if RAILWAY_ENV else 'VIDE'} {RAILWAY_ENV[:8] if RAILWAY_ENV else ''}\n"
+        f"RAILWAY_SERVICE : {'OK' if RAILWAY_SERVICE else 'VIDE'} {RAILWAY_SERVICE[:8] if RAILWAY_SERVICE else ''}\n\n"
+        f"Railway API dispo : {'OUI' if _railway_available() else 'NON'}\n"
     )
-    if trades:
-        for key, t in trades.items():
-            msg += f"- {t['symbol']} : {t['amount_eur']}€\n"
+
+    if _railway_available():
+        raw = _fetch_railway_variable("TRADES_DATA")
+        msg += f"TRADES_DATA lu : {'OUI' if raw else 'NON'} ({len(raw) if raw else 0} chars)\n"
+
+    trades = get_active_trades()
+    msg += f"\nTrades actifs : {len(trades)}\n"
+    for key, t in trades.items():
+        msg += f"- {t['symbol']} : {t['amount_eur']}EUR\n"
 
     await update.message.reply_text(msg)
 
