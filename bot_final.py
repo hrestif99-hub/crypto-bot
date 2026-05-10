@@ -269,39 +269,48 @@ def build_opportunity_message(symbol, analysis):
     )
 
     if is_uv:
-        # ── Message ULTRA VOLATILE ────────────────────────────
-        nb_uv      = analysis.get("nb_criteres_uv", 0)
-        atr_label  = f"{atr:.1f}%" if atr else "N/A"
-        obv_label  = (
+        nb_uv         = analysis.get("nb_criteres_uv", 0)
+        atr_label     = f"{atr:.1f}%" if atr else "N/A"
+        timeframe     = analysis.get("timeframe", "H1")
+        vol_mcap      = analysis.get("vol_mcap_ratio")
+        is_wakeup     = analysis.get("is_wakeup", False)
+        spike_ratio   = analysis.get("spike_ratio", 0)
+        inact_pct     = analysis.get("inactivity_pct", 0)
+
+        obv_label = (
             f"Haussier fort (acc. {obv_acc:.2f})" if obv_up and obv_acc > 0.1
             else "Haussier" if obv_up
             else "Baissier"
         )
         squeeze_label = "OUI — explosion imminente !" if squeeze else "Non"
+        vol_mcap_label = f"{vol_mcap:.0f}%" if vol_mcap else "N/A"
+        wakeup_label  = f"OUI — x{spike_ratio:.0f} vs periode inactive !" if is_wakeup else f"Non ({inact_pct:.0f}% inactif)"
 
         msg = (
             f"ULTRA VOLATILE — OPPORTUNITE DETECTEE\n"
             f"{'=' * 34}\n\n"
-            f"Crypto : {symbol}\n"
-            f"Prix   : {analysis['price']:,.6f} EUR\n"
-            f"Score  : {analysis['score']}/{analysis['score_max']} [{barre}] {analysis['niveau']}\n"
+            f"Crypto    : {symbol}\n"
+            f"Prix      : {analysis['price']:,.6f} EUR\n"
+            f"Timeframe : {timeframe}\n"
+            f"Score     : {analysis['score']}/{analysis['score_max']} [{barre}] {analysis['niveau']}\n"
             f"Criteres UV : {nb_uv}/3 valides\n\n"
             f"--- Indicateurs volatilite ---\n"
-            f"ATR (mouvement moyen/bougie) : {atr_label}  {'OK' if atr and atr > 6 else '--'}\n"
-            f"OBV (accumulation)           : {obv_label}  {'OK' if obv_up else '--'}\n"
-            f"Bollinger Squeeze            : {squeeze_label}  {'OK' if squeeze else '--'}\n\n"
+            f"ATR (mouvement/bougie)  : {atr_label}  {'OK' if atr and atr > 6 else '--'}\n"
+            f"OBV (accumulation)      : {obv_label}  {'OK' if obv_up else '--'}\n"
+            f"Bollinger Squeeze       : {squeeze_label}  {'OK' if squeeze else '--'}\n"
+            f"Vol / Market Cap        : {vol_mcap_label}\n"
+            f"Reveil apres inactivite : {wakeup_label}\n\n"
             f"--- Signaux ---\n"
             f"{signaux_str}"
             f"{alertes_str}\n\n"
             f"Variation 24h : {analysis['change_24h']:+.1f}%\n"
             f"Variation 3j  : {analysis['change_72h']:+.1f}%\n"
             f"Volume        : x{analysis['volume_ratio']:.1f} vs moyenne\n\n"
-            f"--- Regles automatiques pour ce trade ---\n"
-            f"Stop loss     : {analysis['stop_loss_pct']}%  (plus large — coin tres volatile)\n"
+            f"--- Regles automatiques ---\n"
+            f"Stop loss     : {analysis['stop_loss_pct']}%\n"
             f"Trailing stop : -{analysis['trailing_stop_pct']}% depuis le pic\n"
             f"Montant MAX   : {analysis['montant_max_eur']:.0f} EUR\n\n"
-            f"RISQUE ELEVE — Ce coin peut faire -30% en quelques heures\n"
-            f"avant de repartir. Ne mets pas plus de {analysis['montant_max_eur']:.0f} EUR.\n\n"
+            f"RISQUE ELEVE — max {analysis['montant_max_eur']:.0f} EUR\n\n"
             f"Veux-tu acheter ?"
         )
     else:
@@ -404,11 +413,12 @@ async def scan_opportunities(app):
             product_id = product.get("product_id", "?")
             symbol     = product.get("base_currency_id", "?")
             volume_24h = float(product.get("volume_24h", 0) or 0)
+            market_cap = float(product.get("quote_volume_24h", 0) or 0)
             try:
-                # On passe le volume_24h pour la detection ULTRA VOLATILE
                 analysis = await analyze_signals(
                     product_id, COINBASE_API_KEY, COINBASE_API_SECRET,
-                    volume_24h=volume_24h
+                    volume_24h=volume_24h,
+                    market_cap=market_cap
                 )
                 if not analysis:
                     continue

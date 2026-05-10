@@ -209,22 +209,106 @@ def detect_rsi_divergence(closes, period=14, lookback=10):
 
 # ─── Analyse principale ───────────────────────────────────────
 
-async def analyze_signals(product_id, api_key, api_secret, volume_24h=0):
+def calc_vol_mcap_ratio(volume_24h, market_cap):
+    """
+    Ratio Volume 24h / Market Cap en %.
+    Signal cle pre-pump sur les micro caps.
+
+    Seuils :
+      < 5%   → activite normale
+      5-15%  → activite elevee
+      > 15%  → activite anormale — signal fort
+      > 50%  → spike extreme — pump potentiel imminent
+    """
+    if not market_cap or market_cap <= 0 or not volume_24h:
+        return None
+    return round((volume_24h / market_cap) * 100, 2)
+
+
+def detect_inactivity_wakeup(volumes, closes, inactivity_periods=20, spike_factor=5.0):
+    """
+    Detecte un coin qui etait inactif et vient de se reveiller.
+
+    Signal : volume tres faible pendant N periodes, puis spike soudain.
+    C'est un des signaux les plus discriminants pour les pumps sur micro caps.
+
+    Retourne :
+      is_wakeup      : True si le coin se reveille apres inactivite
+      inactivity_pct : % de bougies recentes avec volume quasi nul
+      spike_ratio    : ratio entre le volume actuel et la moyenne de la periode inactive
+    """
+    if len(volumes) < inactivity_periods + 3:
+        return False, 0.0, 0.0
+
+    # Volume moyen sur la periode d'inactivite (bougies N+3 a N)
+    periode_inactive = volumes[-(inactivity_periods + 3):-3]
+    avg_inactive     = sum(periode_inactive) / len(periode_inactive) if periode_inactive else 0
+
+    if avg_inactive <= 0:
+        return False, 0.0, 0.0
+
+    # Volume actuel (moyenne des 3 dernieres bougies)
+    vol_recent   = sum(volumes[-3:]) / 3
+    spike_ratio  = vol_recent / avg_inactive
+
+    # Pourcentage de bougies avec volume < 10% de la moyenne generale
+    avg_global   = sum(volumes) / len(volumes)
+    bougies_inactives = sum(1 for v in periode_inactive if v < avg_global * 0.1)
+    inactivity_pct    = (bougies_inactives / len(periode_inactive)) * 100
+
+    # Wakeup si : periode inactive detectee ET spike soudain
+    is_wakeup = inactivity_pct >= 40 and spike_ratio >= spike_factor
+
+    return is_wakeup, round(inactivity_pct, 1), round(spike_ratio, 1)
+
+
+async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_cap=0):
     """
     Analyse tous les signaux techniques pour un produit.
 
     Detecte automatiquement si le coin est STANDARD ou ULTRA VOLATILE.
 
-    Mode STANDARD       : score /6,  seuil alerte 4,  stop -25%,  trailing 15%,  max 50 EUR
-    Mode ULTRA VOLATILE : score /9,  seuil alerte 5,  stop -35%,  trailing ATR*2.5,  max 15 EUR
+    STANDARD      : bougies H1,   score /6,  seuil 4,  stop -25%, trailing 15%,  max 50 EUR
+    ULTRA VOLATILE: bougies 15min, score /11, seuil 6,  stop -35%, trailing ATR*2.5, max 15 EUR
+
+    Nouveaux signaux UV :
+      - Bougies 15min (au lieu de H1) pour detecter les mouvements rapides
+      - Volume/Market Cap ratio (spike anormal vs taille du coin)
+      - Detection inactivite + reveil (coin mort qui se reveille = signal fort)
     """
     try:
-        candles = await get_candles(product_id, api_key, api_secret, granularity="ONE_HOUR", limit=100)
-
-        if not candles or len(candles) < 30:
+        # ── Etape 1 : analyse initiale sur H1 pour classifier ──
+        candles_h1 = await get_candles(product_id, api_key, api_secret, granularity="ONE_HOUR", limit=100)
+        if not candles_h1 or len(candles_h1) < 30:
             return None
 
-        candles = sorted(candles, key=lambda x: x["start"])
+        candles_h1 = sorted(candles_h1, key=lambda x: x["start"])
+        closes_h1  = [float(c["close"])  for c in candles_h1]
+        volumes_h1 = [float(c["volume"]) for c in candles_h1]
+        highs_h1   = [float(c["high"])   for c in candles_h1]
+        lows_h1    = [float(c["low"])    for c in candles_h1]
+
+        # ATR sur H1 pour la classification UV
+        atr_h1 = calc_atr(highs_h1, lows_h1, closes_h1)
+
+        # Classification UV initiale
+        atr_ultra    = (atr_h1 is not None and atr_h1 > 6.0)
+        volume_micro = (volume_24h > 0 and volume_24h < 500_000)
+        candidat_uv  = atr_ultra or volume_micro
+
+        # ── Etape 2 : si candidat UV, recharge en 15min ────────
+        if candidat_uv:
+            # 100 bougies de 15min = 25 heures d'historique recent
+            candles = await get_candles(product_id, api_key, api_secret, granularity="FIFTEEN_MINUTE", limit=100)
+            if not candles or len(candles) < 30:
+                candles = candles_h1  # fallback H1 si 15min indispo
+                timeframe_label = "H1 (15min indispo)"
+            else:
+                candles = sorted(candles, key=lambda x: x["start"])
+                timeframe_label = "15min"
+        else:
+            candles         = candles_h1
+            timeframe_label = "H1"
 
         closes  = [float(c["close"])  for c in candles]
         volumes = [float(c["volume"]) for c in candles]
@@ -235,14 +319,23 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0):
         current_volume = volumes[-1]
 
         # ── Indicateurs de base ───────────────────────────────
-        rsi                          = calc_rsi(closes)
+        rsi                               = calc_rsi(closes)
         macd_line, signal_line, histogram = calc_macd(closes)
 
-        avg_volume_20  = sum(volumes[-21:-1]) / 20
-        volume_ratio   = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0
+        avg_volume_20 = sum(volumes[-21:-1]) / 20
+        volume_ratio  = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0
 
-        price_24h_ago  = closes[-25] if len(closes) >= 25 else closes[0]
-        price_72h_ago  = closes[-73] if len(closes) >= 73 else closes[0]
+        # Pour UV en 15min : 24h = 96 bougies, 72h = 288 bougies
+        # Pour STD en H1   : 24h = 24 bougies, 72h = 72 bougies
+        if candidat_uv and timeframe_label == "15min":
+            idx_24h = 96
+            idx_72h = 288
+        else:
+            idx_24h = 25
+            idx_72h = 73
+
+        price_24h_ago = closes[-idx_24h] if len(closes) >= idx_24h else closes[0]
+        price_72h_ago = closes[-idx_72h] if len(closes) >= idx_72h else closes[0]
 
         change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100 if price_24h_ago else 0
         change_72h = ((current_price - price_72h_ago) / price_72h_ago) * 100 if price_72h_ago else 0
@@ -262,27 +355,17 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0):
         band_width, is_squeeze, boll_pos = calc_bollinger_squeeze(closes)
         rsi_divergence                   = detect_rsi_divergence(closes)
 
-        # ── Classification ULTRA VOLATILE ─────────────────────
-        # Etape 1 : eligibilite initiale
-        # Un coin est CANDIDAT UV si ATR > 6% OU volume 24h < 500 000 EUR
-        atr_ultra      = (atr_pct is not None and atr_pct > 6.0)
-        volume_micro   = (volume_24h > 0 and volume_24h < 500_000)
-        candidat_uv    = atr_ultra or volume_micro
+        # Nouveaux indicateurs UV
+        vol_mcap_ratio                        = calc_vol_mcap_ratio(volume_24h, market_cap)
+        is_wakeup, inactivity_pct, spike_ratio = detect_inactivity_wakeup(volumes, closes)
 
-        # Etape 2 : on calcule les 3 critères UV individuellement
-        # (avant le scoring pour pouvoir compter)
-        critere_atr     = atr_ultra                          # ATR > 6%
-        critere_obv     = obv_haussier                       # OBV haussier
-        critere_squeeze = is_squeeze                         # Bollinger Squeeze actif
+        # ── Classification finale ULTRA VOLATILE ──────────────
+        critere_atr     = atr_ultra
+        critere_obv     = obv_haussier
+        critere_squeeze = is_squeeze
+        nb_criteres_uv  = sum([critere_atr, critere_obv, critere_squeeze])
 
-        nb_criteres_uv = sum([critere_atr, critere_obv, critere_squeeze])
-
-        # Etape 3 : classification finale
-        # Pour etre ULTRA VOLATILE :
-        # - ATR > 6% OBLIGATOIRE (le coin doit vraiment bouger fort)
-        # - + au moins 1 autre critere parmi OBV ou Squeeze
-        # Cela evite de classer de gros altcoins stables (UNI, LINK...) comme UV
-        # meme si leur OBV et Squeeze sont actifs
+        # ATR > 6% obligatoire + au moins 1 autre (OBV ou Squeeze)
         is_ultra_volatile = critere_atr and (critere_obv or critere_squeeze)
 
         # ── Scoring ───────────────────────────────────────────
@@ -290,101 +373,129 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0):
         signaux = []
         alertes = []
 
-        # --- Points communs aux deux modes (6 pts max) ---
-
-        if rsi is not None:
-            if 40 <= rsi <= 65:
-                score += 1
-                signaux.append(f"RSI favorable ({rsi:.0f})")
-            elif rsi > 75:
-                alertes.append(f"RSI suracheté ({rsi:.0f})")
-            elif rsi < 30:
-                if rsi_divergence:
-                    score += 1
-                    signaux.append(f"RSI survendu + divergence haussiere ({rsi:.0f}) — retournement probable")
-                else:
-                    alertes.append(f"RSI survendu ({rsi:.0f})")
-
-        if macd_line is not None and signal_line is not None:
-            if macd_line > signal_line and histogram > 0:
-                score += 1
-                signaux.append("MACD haussier")
-            elif macd_line < signal_line:
-                alertes.append("MACD baissier")
-
-        if volume_ratio >= 1.5:
-            score += 1
-            signaux.append(f"Volume x{volume_ratio:.1f} vs moyenne")
-        elif volume_ratio < 0.7:
-            alertes.append("Volume faible")
-
-        if change_72h >= 5:
-            score += 1
-            signaux.append(f"Hausse 3j : +{change_72h:.1f}%")
-        elif change_72h < -10:
-            alertes.append(f"Baisse 3j : {change_72h:.1f}%")
-
-        if 3 <= change_24h <= 25:
-            score += 1
-            signaux.append(f"Momentum 24h : +{change_24h:.1f}%")
-        elif change_24h > 30:
-            alertes.append(f"Hausse 24h trop forte ({change_24h:.1f}%)")
-
-        if bullish_candles >= 2:
-            score += 1
-            signaux.append(f"{bullish_candles}/3 bougies haussières")
-
-        score_max = 6
-
-        # --- Points supplementaires ULTRA VOLATILE (+3 pts) ---
         if is_ultra_volatile:
-            score_max = 9
+            # ── Score ULTRA VOLATILE sur 5 points ────────────
+            # RSI et MACD retires : trop lents pour les UV
+            # Seuls les signaux pertinents pour les explosions rapides
+            score_max = 5
 
+            # 1. ATR > 6%
             if atr_pct is not None and atr_pct > 6.0:
                 score += 1
-                signaux.append(f"ATR {atr_pct:.1f}%/bougie — fort potentiel de mouvement rapide")
-            elif atr_pct is not None:
-                alertes.append(f"ATR modéré {atr_pct:.1f}% — volatilité pas encore au maximum")
+                signaux.append(f"ATR {atr_pct:.1f}%/bougie ({timeframe_label}) — mouvement rapide possible")
+            else:
+                alertes.append(f"ATR faible {atr_pct:.1f}%" if atr_pct else "ATR indisponible")
 
+            # 2. OBV haussier
             if obv_haussier:
                 score += 1
                 if obv_accel > 0.1:
-                    signaux.append(f"OBV en forte hausse — accumulation agressive détectée")
+                    signaux.append(f"OBV en forte hausse — accumulation agressive")
                 else:
                     signaux.append(f"OBV haussier — accumulation silencieuse en cours")
             else:
                 alertes.append("OBV baissier — pas d'accumulation visible")
 
+            # 3. Bollinger Squeeze
             if is_squeeze and band_width is not None:
                 score += 1
-                signaux.append(f"Bollinger Squeeze ({band_width:.1f}%) — explosion de prix imminente")
-            elif band_width is not None:
-                alertes.append(f"Bandes Bollinger larges ({band_width:.1f}%) — pas de squeeze")
+                signaux.append(f"Bollinger Squeeze ({band_width:.1f}%) — explosion imminente")
+            else:
+                alertes.append(f"Pas de squeeze ({band_width:.1f}%)" if band_width else "Squeeze indisponible")
+
+            # 4. Vol / Market Cap > 15%
+            if vol_mcap_ratio is not None:
+                if vol_mcap_ratio > 50:
+                    score += 1
+                    signaux.append(f"Vol/MktCap {vol_mcap_ratio:.0f}% — spike extreme, pump potentiel")
+                elif vol_mcap_ratio > 15:
+                    score += 1
+                    signaux.append(f"Vol/MktCap {vol_mcap_ratio:.0f}% — activite anormale")
+                else:
+                    alertes.append(f"Vol/MktCap {vol_mcap_ratio:.0f}% — activite normale")
+            else:
+                alertes.append("Vol/MktCap indisponible")
+
+            # 5. Reveil apres inactivite
+            if is_wakeup:
+                score += 1
+                signaux.append(f"REVEIL apres inactivite — volume x{spike_ratio:.0f} vs periode dormante")
+            else:
+                alertes.append(f"Pas de reveil detecte")
+
+            min_score_alerte = 3
+
+        else:
+            # ── Score STANDARD sur 6 points ──────────────────
+            score_max = 6
+
+            if rsi is not None:
+                if 40 <= rsi <= 65:
+                    score += 1
+                    signaux.append(f"RSI favorable ({rsi:.0f})")
+                elif rsi > 75:
+                    alertes.append(f"RSI suracheté ({rsi:.0f})")
+                elif rsi < 30:
+                    if rsi_divergence:
+                        score += 1
+                        signaux.append(f"RSI survendu + divergence haussiere ({rsi:.0f}) — retournement probable")
+                    else:
+                        alertes.append(f"RSI survendu ({rsi:.0f})")
+
+            if macd_line is not None and signal_line is not None:
+                if macd_line > signal_line and histogram > 0:
+                    score += 1
+                    signaux.append("MACD haussier")
+                elif macd_line < signal_line:
+                    alertes.append("MACD baissier")
+
+            if volume_ratio >= 1.5:
+                score += 1
+                signaux.append(f"Volume x{volume_ratio:.1f} vs moyenne")
+            elif volume_ratio < 0.7:
+                alertes.append("Volume faible")
+
+            if change_72h >= 5:
+                score += 1
+                signaux.append(f"Hausse 3j : +{change_72h:.1f}%")
+            elif change_72h < -10:
+                alertes.append(f"Baisse 3j : {change_72h:.1f}%")
+
+            if 3 <= change_24h <= 25:
+                score += 1
+                signaux.append(f"Momentum 24h : +{change_24h:.1f}%")
+            elif change_24h > 30:
+                alertes.append(f"Hausse 24h trop forte ({change_24h:.1f}%)")
+
+            if bullish_candles >= 2:
+                score += 1
+                signaux.append(f"{bullish_candles}/3 bougies haussières")
+
+            min_score_alerte = 4
 
         # ── Niveau de confiance ───────────────────────────────
         ratio = score / score_max if score_max > 0 else 0
-        if ratio >= 0.78:
+        if ratio >= 0.8:
             niveau = "FORT"
-        elif ratio >= 0.55:
+        elif ratio >= 0.6:
             niveau = "MOYEN"
         else:
             niveau = "FAIBLE"
 
         # ── Parametres de trading adaptes au profil ───────────
         if is_ultra_volatile:
-            stop_loss_pct    = -35.0
-            trailing_stop    = round(max(20.0, (atr_pct or 6.0) * 2.5), 1)
-            montant_max      = 15.0
-            min_score_alerte = 5
+            stop_loss_pct = -35.0
+            trailing_stop = round(max(20.0, (atr_pct or 6.0) * 2.5), 1)
+            montant_max   = 15.0
         else:
-            stop_loss_pct    = -25.0
-            trailing_stop    = 15.0
-            montant_max      = 50.0
-            min_score_alerte = 4
+            stop_loss_pct = -25.0
+            trailing_stop = 15.0
+            montant_max   = 50.0
 
         return {
             "product_id":        product_id,
             "price":             current_price,
+            "timeframe":         timeframe_label,
             "rsi":               rsi,
             "macd":              macd_line,
             "macd_signal":       signal_line,
@@ -400,6 +511,11 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0):
             "bollinger_width":   band_width,
             "bollinger_squeeze": is_squeeze,
             "rsi_divergence":    rsi_divergence,
+            # Nouveaux indicateurs UV
+            "vol_mcap_ratio":    vol_mcap_ratio,
+            "is_wakeup":         is_wakeup,
+            "inactivity_pct":    inactivity_pct,
+            "spike_ratio":       spike_ratio,
             # Classification
             "is_ultra_volatile":   is_ultra_volatile,
             "nb_criteres_uv":      nb_criteres_uv,
