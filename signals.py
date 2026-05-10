@@ -477,7 +477,7 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
                 score += 1
                 signaux.append(f"{bullish_candles}/3 bougies haussières")
 
-            min_score_alerte = 4
+            min_score_alerte = 5
 
         # ── Niveau de confiance ───────────────────────────────
         ratio = score / score_max if score_max > 0 else 0
