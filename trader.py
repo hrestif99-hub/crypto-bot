@@ -8,8 +8,8 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 TRADES_FILE  = "trades.json"
-JSONBIN_ID   = os.environ.get("JSONBIN_BIN_ID", "")
-JSONBIN_KEY  = os.environ.get("JSONBIN_KEY", "")
+JSONBIN_ID   = os.environ.get("DB_BIN", "")
+JSONBIN_KEY  = os.environ.get("DB_AUTH", "")
 JSONBIN_URL  = f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}"
 
 
