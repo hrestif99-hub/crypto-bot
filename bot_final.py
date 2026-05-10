@@ -447,8 +447,9 @@ async def scan_opportunities(app):
                 if not analysis:
                     continue
 
-                # Seuil d'alerte adapte au profil, ou bypass si +40% sur 24h
-                if analysis["score"] >= analysis["min_score_alerte"] or analysis.get("is_momentum_alert"):
+                # UV uniquement (score suffisant) ou momentum fort (+30% sur 24h)
+                is_uv_valid = analysis.get("is_ultra_volatile") and analysis["score"] >= analysis["min_score_alerte"]
+                if is_uv_valid or analysis.get("is_momentum_alert"):
                     opportunities.append((product_id, symbol, analysis))
             except Exception as e:
                 logger.error(f"[scan_opportunities] {product_id} : {e}", exc_info=True)

@@ -554,8 +554,8 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             "stop_loss_pct":       stop_loss_pct,
             "trailing_stop_pct":   trailing_stop,
             "montant_max_eur":     montant_max,
-            # Bypass : force l'alerte si +40% sur 24h peu importe le score
-            "is_momentum_alert":   change_24h >= 40,
+            # Bypass : force l'alerte si +30% sur 24h peu importe le score
+            "is_momentum_alert":   change_24h >= 30,
         }
 
     except Exception as e:
