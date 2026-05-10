@@ -293,7 +293,7 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
 
         # Classification UV initiale
         atr_ultra    = (atr_h1 is not None and atr_h1 > 6.0)
-        volume_micro = (volume_24h > 0 and volume_24h < 500_000)
+        volume_micro = (volume_24h > 0 and volume_24h < 50_000)
         candidat_uv  = atr_ultra or volume_micro
 
         # ── Etape 2 : si candidat UV, recharge en 15min ────────

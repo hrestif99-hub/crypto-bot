@@ -11,7 +11,8 @@ import aiohttp
 from signals import analyze_signals
 from coinbase import (
     get_available_products, get_product_price, get_eur_balance,
-    place_market_buy, place_market_sell, get_portfolio
+    place_market_buy, place_market_sell, get_portfolio,
+    place_market_buy_usdc, place_market_sell_usdc
 )
 from trader import (
     add_trade, update_trade_peak, should_sell, close_trade,
@@ -364,20 +365,32 @@ async def monitor_trades(app):
                 reset_stop_confirmation(key)
 
             if decision is True:
-                success, order_id, _ = await place_market_sell(
-                    COINBASE_API_KEY, COINBASE_API_SECRET,
-                    product_id, trade["quantity"]
-                )
+                is_usdc = product_id.endswith("-USDC")
+                if is_usdc:
+                    success, eur_recupere, sell_price, order_id = await place_market_sell_usdc(
+                        COINBASE_API_KEY, COINBASE_API_SECRET,
+                        product_id, trade["quantity"]
+                    )
+                    if not sell_price:
+                        sell_price = current_price
+                else:
+                    success, order_id, _ = await place_market_sell(
+                        COINBASE_API_KEY, COINBASE_API_SECRET,
+                        product_id, trade["quantity"]
+                    )
+                    sell_price = current_price
+
                 if success:
-                    pnl_pct, pnl_eur = close_trade(key, current_price, reason)
-                    signe = "+" if pnl_eur >= 0 else ""
+                    pnl_pct, pnl_eur = close_trade(key, sell_price, reason)
+                    signe  = "+" if pnl_eur >= 0 else ""
                     profil = "ULTRA VOLATILE" if trade.get("is_ultra_volatile") else "STANDARD"
+                    usdc_note = " (USDC→EUR converti auto)" if is_usdc else ""
                     msg = (
                         f"VENTE AUTOMATIQUE\n\n"
                         f"Crypto  : {trade['symbol']}  [{profil}]\n"
                         f"Raison  : {reason}\n"
                         f"Entree  : {trade['entry_price']:,.4f} EUR\n"
-                        f"Vente   : {current_price:,.4f} EUR\n"
+                        f"Vente   : {sell_price:,.4f} EUR{usdc_note}\n"
                         f"Investi : {trade['amount_eur']:.2f} EUR\n"
                         f"P&L     : {signe}{pnl_eur:.2f} EUR ({signe}{pnl_pct:.1f}%)\n"
                         f"Pic atteint : +{trade['peak_pct']:.1f}%"
@@ -401,7 +414,7 @@ async def scan_opportunities(app):
         if not products:
             return
 
-        products = [p for p in products if p.get("quote_currency_id") == "EUR"]
+        products = [p for p in products if p.get("quote_currency_id") in ("EUR", "USDC")]
         products = sorted(
             products,
             key=lambda x: float(x.get("volume_24h", 0) or 0),
@@ -537,8 +550,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ── Vente manuelle ────────────────────────────────────────
     elif data.startswith("sell_select_"):
-        # L'utilisateur a choisi quelle entree vendre
-        trade_key = data.replace("sell_select_", "")
+        # Extraire le trade_key en retirant uniquement le prefixe
+        trade_key = data[len("sell_select_"):]
         trades    = get_active_trades()
         if trade_key not in trades:
             await query.edit_message_text("Ce trade n'existe plus.")
@@ -557,10 +570,12 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data.startswith("sell_confirm_"):
-        # L'utilisateur confirme la vente
-        parts     = data.split("_")
-        trade_key = parts[2]
-        amount_eur = float(parts[3])
+        # Format : sell_confirm_TRADEKEY_AMOUNT
+        # Le montant est apres le dernier underscore, le trade_key est le reste
+        suffix    = data[len("sell_confirm_"):]
+        last_sep  = suffix.rfind("_")
+        trade_key  = suffix[:last_sep]
+        amount_eur = float(suffix[last_sep + 1:])
 
         trades = get_active_trades()
         if trade_key not in trades:
@@ -648,24 +663,32 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(f"Achat de {amount}€ de {symbol} en cours...")
 
-        success, order_id, order_data = await place_market_buy(
-            COINBASE_API_KEY, COINBASE_API_SECRET, product_id, amount
-        )
+        is_usdc_pair = product_id.endswith("-USDC")
+
+        if is_usdc_pair:
+            # Achat via USDC : conversion EUR→USDC puis achat
+            success, quantity, current_price, order_id = await place_market_buy_usdc(
+                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, amount
+            )
+        else:
+            success, order_id, order_data = await place_market_buy(
+                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, amount
+            )
+            if success:
+                current_price = await get_product_price(product_id, COINBASE_API_KEY, COINBASE_API_SECRET)
+                quantity      = amount / current_price if current_price else 0
 
         if success:
-            current_price = await get_product_price(product_id, COINBASE_API_KEY, COINBASE_API_SECRET)
             if not current_price:
                 remove_pending(product_id)
                 await ctx.bot.send_message(
                     chat_id=CHAT_ID,
                     text=(
-                        f"ACHAT {symbol} reussi (ordre {order_id}) mais prix introuvable.\n"
+                        f"ACHAT {symbol} reussi mais prix introuvable.\n"
                         f"Ajoute le trade manuellement : /buy {symbol} {amount} <prix_achat>"
                     )
                 )
                 return
-
-            quantity = amount / current_price
 
             # On passe le profil et les parametres adaptes a add_trade
             key, trade = add_trade(
