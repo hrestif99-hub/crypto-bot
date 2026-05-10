@@ -308,6 +308,14 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
         volume_micro = (volume_24h > 0 and volume_24h < 50_000)
         candidat_uv  = atr_ultra or volume_micro
 
+        # Log debug pour comprendre pourquoi les coins ne passent pas en UV
+        if atr_15 is not None and atr_15 > 1.5:
+            logger.info(
+                f"[UV_DEBUG] {product_id} | ATR15={atr_15:.2f}% | "
+                f"atr_ultra={atr_ultra} | vol24h={volume_24h:.0f} | "
+                f"volume_micro={volume_micro} | candidat_uv={candidat_uv}"
+            )
+
         # ── Etape 2 : choisir le timeframe d'analyse ───────────
         if candidat_uv and candles_15 and len(candles_15) >= 30:
             candles         = candles_15
@@ -373,6 +381,16 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
         nb_criteres_uv  = sum([critere_atr, critere_obv, critere_squeeze])
 
         is_ultra_volatile = critere_atr and (critere_obv or critere_squeeze)
+
+        # Log debug classification finale
+        if candidat_uv:
+            logger.info(
+                f"[UV_DEBUG] {product_id} CANDIDAT | "
+                f"critere_atr={critere_atr} | critere_obv={critere_obv} | "
+                f"critere_squeeze={critere_squeeze} | "
+                f"is_ultra_volatile={is_ultra_volatile} | "
+                f"obv_accel={obv_accel:.3f} | band_width={band_width}"
+            )
 
         # ── Scoring ───────────────────────────────────────────
         score   = 0
