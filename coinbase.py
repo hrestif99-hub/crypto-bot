@@ -309,6 +309,11 @@ async def get_portfolio_with_history(api_key, api_secret):
 
 
 
+async def get_eur_balance(api_key, api_secret):
+    portfolio = await get_portfolio(api_key, api_secret)
+    return portfolio.get("EUR", 0.0)
+
+
 async def get_usdc_balance(api_key, api_secret):
     portfolio = await get_portfolio(api_key, api_secret)
     return portfolio.get("USDC", 0.0)
