@@ -447,7 +447,7 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             else:
                 alertes.append(f"Pas de reveil detecte")
 
-            min_score_alerte = 3
+            min_score_alerte = 2
 
         else:
             # ── Score STANDARD sur 6 points ──────────────────
