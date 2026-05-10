@@ -700,63 +700,76 @@ async def cmd_recap(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg += "─────────────────\n\n"
 
     if active_trades:
-        msg += "TRADES ACTIFS (auto)\n\n"
+        msg += "TRADES ACTIFS\n\n"
+
+        # ── Grouper les trades par coin ───────────────────────
+        coins_trades = {}
         for key, trade in active_trades.items():
+            symbol = trade["symbol"]
+            if symbol not in coins_trades:
+                coins_trades[symbol] = []
+            coins_trades[symbol].append((key, trade))
+
+        for symbol, entries in coins_trades.items():
+            # Recupere le prix actuel une seule fois par coin
+            product_id    = entries[0][1]["product_id"]
             current_price = await get_product_price(
-                trade["product_id"], COINBASE_API_KEY, COINBASE_API_SECRET
+                product_id, COINBASE_API_KEY, COINBASE_API_SECRET
             )
-            entry_price = trade["entry_price"]
-            profil      = "UV" if trade.get("is_ultra_volatile") else "STD"
-            if current_price and entry_price:
-                pct    = ((current_price - entry_price) / entry_price) * 100
-                pnl    = (current_price - entry_price) * trade["quantity"]
-                statut = "EN GAIN" if pct >= 0 else "EN PERTE"
+            profil = "UV" if entries[0][1].get("is_ultra_volatile") else "STD"
+            nb     = len(entries)
+
+            msg += f"{'─' * 20}\n"
+            msg += f"{symbol} [{profil}] — {nb} entree{'s' if nb > 1 else ''}\n\n"
+
+            total_investi  = 0
+            total_pnl_eur  = 0
+            total_quantite = 0
+
+            for i, (key, trade) in enumerate(entries, 1):
+                entry_price = trade["entry_price"]
+                quantite    = trade["quantity"]
+                investi     = trade["amount_eur"]
+                date        = trade.get("date", "?")
+                peak_pct    = trade.get("peak_pct", 0)
+
+                if current_price and entry_price:
+                    pct = ((current_price - entry_price) / entry_price) * 100
+                    pnl = (current_price - entry_price) * quantite
+                    statut = "GAIN" if pct >= 0 else "PERTE"
+                    signe  = "+" if pnl >= 0 else ""
+                    msg += (
+                        f"Entree {i} — {date}\n"
+                        f"  Investi : {investi:.2f} EUR a {entry_price:,.4f} EUR\n"
+                        f"  Actuel  : {current_price:,.4f} EUR\n"
+                        f"  P&L     : {signe}{pnl:.2f} EUR ({signe}{pct:.1f}%) — {statut}\n"
+                        f"  Pic     : +{peak_pct:.1f}%\n\n"
+                    )
+                    total_pnl_eur  += pnl
+                else:
+                    msg += (
+                        f"Entree {i} — {date}\n"
+                        f"  Investi : {investi:.2f} EUR a {entry_price:,.4f} EUR\n"
+                        f"  Prix actuel indisponible\n\n"
+                    )
+
+                total_investi  += investi
+                total_quantite += quantite
+
+            # Total du coin
+            if current_price and total_investi:
+                total_pct  = (total_pnl_eur / total_investi) * 100
+                signe      = "+" if total_pnl_eur >= 0 else ""
+                val_actuelle = total_quantite * current_price
                 msg += (
-                    f"{trade['symbol']} [{profil}] — {statut}\n"
-                    f"Entree  : {entry_price:,.4f} EUR\n"
-                    f"Actuel  : {current_price:,.4f} EUR\n"
-                    f"P&L     : {pnl:+.2f} EUR ({pct:+.1f}%)\n"
-                    f"Pic     : +{trade['peak_pct']:.1f}%\n"
-                    f"Stop    : {trade['stop_loss_pct']}%  "
-                    f"Trailing : -{trade['trailing_stop_pct']}%\n\n"
+                    f"TOTAL {symbol} : {total_investi:.2f} EUR investi\n"
+                    f"Valeur actuelle : {val_actuelle:.2f} EUR\n"
+                    f"P&L total : {signe}{total_pnl_eur:.2f} EUR ({signe}{total_pct:.1f}%)\n"
+                    f"Stop : {entries[0][1]['stop_loss_pct']}%  "
+                    f"Trailing : -{entries[0][1]['trailing_stop_pct']}%\n\n"
                 )
-            else:
-                msg += (
-                    f"{trade['symbol']} [{profil}] — prix indisponible\n"
-                    f"Entree : {entry_price:,.4f} EUR\n"
-                    f"Pic    : +{trade['peak_pct']:.1f}%\n\n"
-                )
+
             await asyncio.sleep(0.3)
-
-    positions = load_positions()
-    if positions:
-        msg += "POSITIONS MANUELLES\n\n"
-        coins  = list(set(p["coin"] for p in positions.values()))
-        prices = await get_coingecko_prices(coins)
-        total_investi = total_actuel = 0
-
-        for key, pos in positions.items():
-            coin       = pos["coin"]
-            info       = prices.get(coin, {})
-            current    = info.get("price", 0)
-            change_24h = info.get("change_24h", 0)
-            pct        = ((current - pos["entry_price"]) / pos["entry_price"] * 100) if current else 0
-            val        = pos["quantity"] * current if current else 0
-            pnl        = val - pos["amount_eur"]
-            statut     = "EN GAIN" if pct >= 0 else "EN PERTE"
-            msg += (
-                f"{coin} — {statut}\n"
-                f"Entree : {pos['entry_price']:,.4f} EUR\n"
-                f"Actuel : {current:,.4f} EUR\n"
-                f"24h    : {change_24h:+.1f}%\n"
-                f"Perf   : {pct:+.1f}% | P&L : {pnl:+.2f} EUR\n\n"
-            )
-            total_investi += pos["amount_eur"]
-            total_actuel  += val
-
-        total_pnl = total_actuel - total_investi
-        total_pct = (total_pnl / total_investi * 100) if total_investi else 0
-        msg += f"Total positions : {total_pnl:+.2f} EUR ({total_pct:+.1f}%)\n\n"
 
     msg += "─────────────────\n"
     msg += "BILAN GLOBAL\n"
