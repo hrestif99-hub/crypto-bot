@@ -303,8 +303,8 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             atr_15 = None
 
         # Classification UV initiale
-        # ATR > 4% sur 15min OU volume 24h < 50 000 EUR
-        atr_ultra    = (atr_15 is not None and atr_15 > 4.0)
+        # ATR > 3% sur 15min OU volume 24h < 50 000 EUR
+        atr_ultra    = (atr_15 is not None and atr_15 > 3.0)
         volume_micro = (volume_24h > 0 and volume_24h < 50_000)
         candidat_uv  = atr_ultra or volume_micro
 
@@ -385,8 +385,8 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             # Seuls les signaux pertinents pour les explosions rapides
             score_max = 5
 
-            # 1. ATR > 4% sur 15min
-            if atr_15 is not None and atr_15 > 4.0:
+            # 1. ATR > 3% sur 15min
+            if atr_15 is not None and atr_15 > 3.0:
                 score += 1
                 signaux.append(f"ATR {atr_15:.1f}%/bougie (15min) — mouvement rapide en cours")
             else:
