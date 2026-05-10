@@ -47,6 +47,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def round_quantity(qty: float) -> float:
+    """Arrondit une quantite selon sa taille pour respecter les limites Coinbase."""
+    if qty > 1:
+        return round(qty, 4)
+    elif qty > 0.01:
+        return round(qty, 6)
+    else:
+        return round(qty, 8)
+
+
 # ─── Gestion positions manuelles ─────────────────────────────
 
 def load_positions():
@@ -586,7 +596,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # Calculer la quantite a vendre
         quantite = (amount_eur / current_price) if current_price else balance
-        quantite = min(quantite, balance)
+        quantite = round_quantity(min(quantite, balance))
 
         is_usdc = product_id.endswith("-USDC")
         if is_usdc:
@@ -667,7 +677,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         quantite_totale = trade["quantity"]
         val_totale      = quantite_totale * current_price
         ratio_vente     = min(amount_eur / val_totale, 1.0)
-        quantite_vendre = quantite_totale * ratio_vente
+        quantite_vendre = round_quantity(quantite_totale * ratio_vente)
 
         await query.edit_message_text(f"Vente de {amount_eur:.2f} EUR de {symbol} en cours...")
 
