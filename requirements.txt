@@ -4,3 +4,7 @@ PyJWT
 cryptography
 requests
 schedule
+solana
+solders
+telethon
+base58

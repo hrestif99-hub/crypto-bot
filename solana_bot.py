@@ -1,0 +1,738 @@
+#!/usr/bin/env python3
+"""Bot de trading autonome Solana memecoins — tourne en parallèle du bot Coinbase."""
+
+import asyncio
+import aiohttp
+import os
+import json
+import logging
+import re
+import base64
+from datetime import datetime, timedelta
+from collections import defaultdict
+
+# ─── Configuration ────────────────────────────────────────────
+SOLANA_PRIVATE_KEY  = os.environ.get("SOLANA_PRIVATE_KEY", "")
+HELIUS_RPC_URL      = os.environ.get("HELIUS_RPC_URL", "https://api.mainnet-beta.solana.com")
+TELEGRAM_API_ID     = os.environ.get("TELEGRAM_API_ID", "")
+TELEGRAM_API_HASH   = os.environ.get("TELEGRAM_API_HASH", "")
+TELEGRAM_TOKEN      = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID             = os.environ.get("CHAT_ID", "").strip()
+
+USDC_MINT      = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDC_DECIMALS  = 6
+
+TRADE_USDC      = 2.0
+PYRAMID_USDC    = 1.0
+MAX_POSITIONS   = 5
+MAX_TOTAL_USDC  = 10.0
+MIN_USDC        = 2.0
+MAX_PYRAMIDS    = 3
+PYRAMID_COOL    = 30 * 60   # 30 min
+PYRAMID_TRIGGER = 30.0      # +30%
+SLIPPAGE_BPS    = 1500      # 15%
+
+STOP_LOSS_PCT   = -30.0
+TP_HALF_PCT     = 50.0      # vendre 50% à +50%
+TP_FULL_PCT     = 100.0     # vendre 100% à +100%
+TRAILING_PCT    = 25.0      # trailing -25% depuis le pic (actif si pic >= +50%)
+
+SCAN_INTERVAL    = 60
+MONITOR_INTERVAL = 30
+PYRAMID_INTERVAL = 300
+
+CHANNELS         = ["pumping_sol", "solana_degens", "dexscreener_trending"]
+SIGNAL_WINDOW    = 300   # 5 min
+SIGNAL_THRESHOLD = 3     # 3 canaux distincts
+
+SOL_ADDR_RE = re.compile(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b')
+
+logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
+logger = logging.getLogger("solana_bot")
+
+# ─── État global ──────────────────────────────────────────────
+positions    = {}   # mint -> dict
+blacklist    = set()
+tg_mentions  = defaultdict(lambda: defaultdict(list))  # mint -> channel -> [datetime]
+
+POSITIONS_FILE = "solana_positions.json"
+BLACKLIST_FILE  = "solana_blacklist.json"
+
+
+def _load_state():
+    global positions, blacklist
+    if os.path.exists(POSITIONS_FILE):
+        with open(POSITIONS_FILE) as f:
+            positions = json.load(f)
+    if os.path.exists(BLACKLIST_FILE):
+        with open(BLACKLIST_FILE) as f:
+            blacklist = set(json.load(f))
+
+
+def _save_state():
+    with open(POSITIONS_FILE, "w") as f:
+        json.dump(positions, f, indent=2, default=str)
+    with open(BLACKLIST_FILE, "w") as f:
+        json.dump(list(blacklist), f)
+
+
+# ─── Keypair Solana ───────────────────────────────────────────
+_keypair = None
+
+
+def get_keypair():
+    global _keypair
+    if _keypair is not None:
+        return _keypair
+    if not SOLANA_PRIVATE_KEY:
+        return None
+    try:
+        from solders.keypair import Keypair
+        import base58 as b58
+        raw = b58.b58decode(SOLANA_PRIVATE_KEY)
+        _keypair = Keypair.from_bytes(raw)
+        logger.info(f"Wallet chargé : {_keypair.pubkey()}")
+        return _keypair
+    except Exception:
+        pass
+    try:
+        from solders.keypair import Keypair
+        _keypair = Keypair.from_bytes(bytes(json.loads(SOLANA_PRIVATE_KEY)))
+        return _keypair
+    except Exception as e:
+        logger.error(f"Keypair invalide : {e}")
+        return None
+
+
+# ─── Utilitaires HTTP ─────────────────────────────────────────
+async def fetch_json(session: aiohttp.ClientSession, url: str, **kw):
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), **kw) as r:
+            if r.status == 200:
+                return await r.json(content_type=None)
+    except Exception as e:
+        logger.debug(f"fetch_json {url[:60]}: {e}")
+    return None
+
+
+async def post_json(session: aiohttp.ClientSession, url: str, payload: dict):
+    try:
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status == 200:
+                return await r.json(content_type=None)
+    except Exception as e:
+        logger.debug(f"post_json {url[:60]}: {e}")
+    return None
+
+
+# ─── Telegram ────────────────────────────────────────────────
+async def send_tg(text: str):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(url, json={"chat_id": CHAT_ID, "text": text},
+                         timeout=aiohttp.ClientTimeout(total=10))
+    except Exception as e:
+        logger.error(f"send_tg: {e}")
+
+
+# ─── Balance USDC on-chain ────────────────────────────────────
+async def get_usdc_balance() -> float:
+    kp = get_keypair()
+    if not kp:
+        return 0.0
+    try:
+        from solana.rpc.async_api import AsyncClient
+        from solders.pubkey import Pubkey
+        async with AsyncClient(HELIUS_RPC_URL) as client:
+            resp = await client.get_token_accounts_by_owner_json_parsed(
+                kp.pubkey(), {"mint": Pubkey.from_string(USDC_MINT)}
+            )
+            total = 0.0
+            for acct in (resp.value or []):
+                info = acct.account.data.parsed["info"]["tokenAmount"]
+                total += float(info.get("uiAmount") or 0)
+            return total
+    except Exception as e:
+        logger.error(f"get_usdc_balance: {e}")
+        return 0.0
+
+
+# ─── DexScreener ─────────────────────────────────────────────
+async def fetch_dexscreener_new(session: aiohttp.ClientSession) -> list[dict]:
+    data = await fetch_json(session, "https://api.dexscreener.com/token-profiles/latest/v1")
+    if not data:
+        return []
+    items = data if isinstance(data, list) else data.get("data", [])
+    return [
+        {"address": item.get("tokenAddress") or item.get("address"), "source": "dexscreener"}
+        for item in items
+        if item.get("chainId") == "solana" and (item.get("tokenAddress") or item.get("address"))
+    ]
+
+
+async def fetch_dexscreener_pair(session: aiohttp.ClientSession, mint: str):
+    data = await fetch_json(session, f"https://api.dexscreener.com/latest/dex/tokens/{mint}")
+    if not data:
+        return None
+    pairs = [p for p in (data.get("pairs") or []) if p.get("chainId") == "solana"]
+    if not pairs:
+        return None
+    pairs.sort(key=lambda x: float((x.get("liquidity") or {}).get("usd", 0) or 0), reverse=True)
+    return pairs[0]
+
+
+# ─── Pump.fun ────────────────────────────────────────────────
+async def fetch_pumpfun_new(session: aiohttp.ClientSession) -> list[dict]:
+    url = "https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC"
+    data = await fetch_json(session, url)
+    if not data:
+        return []
+    now = datetime.utcnow()
+    result = []
+    for item in (data if isinstance(data, list) else []):
+        mint = item.get("mint")
+        if not mint:
+            continue
+        ts = item.get("created_timestamp", 0)
+        if ts:
+            created = datetime.utcfromtimestamp(ts / 1000 if ts > 1e10 else ts)
+            age_min = (now - created).total_seconds() / 60
+        else:
+            age_min = 999.0
+        result.append({
+            "address":    mint,
+            "symbol":     item.get("symbol", "?"),
+            "name":       item.get("name", "?"),
+            "age_min":    age_min,
+            "market_cap": float(item.get("usd_market_cap", 0) or 0),
+            "source":     "pumpfun",
+        })
+    return result
+
+
+# ─── GoPlus ──────────────────────────────────────────────────
+async def check_goplus(session: aiohttp.ClientSession, mint: str):
+    url = f"https://api.gopluslabs.io/api/v1/solana/token_security?contract_addresses={mint}"
+    data = await fetch_json(session, url)
+    if not data:
+        return None
+    result = data.get("result", {})
+    return result.get(mint) or result.get(mint.lower())
+
+
+def goplus_red_flags(gp: dict) -> list[str]:
+    if not gp:
+        return []
+    flags = []
+    if str(gp.get("is_honeypot", "0")) == "1":
+        flags.append("honeypot")
+    sell_tax = float(gp.get("sell_tax", 0) or 0)
+    if sell_tax > 10:
+        flags.append(f"sell_tax={sell_tax:.0f}%")
+    if str(gp.get("is_mintable", "0")) == "1" or gp.get("mint_authority"):
+        flags.append("mintable")
+    top10 = float(gp.get("top_10_holder_rate", 0) or 0)
+    if top10 > 0.5:
+        flags.append(f"top10={top10*100:.0f}%")
+    return flags
+
+
+def goplus_minor_flags(gp: dict) -> int:
+    if not gp:
+        return 0
+    count = 0
+    if gp.get("freeze_authority"):
+        count += 1
+    if str(gp.get("can_take_back_ownership", "0")) == "1":
+        count += 1
+    return count
+
+
+# ─── Scoring ─────────────────────────────────────────────────
+def compute_score(pair, pumpfun: dict | None, gp, tg_bonus: bool) -> tuple[int, str]:
+    score = 0
+    parts = []
+
+    liq = float((pair.get("liquidity") or {}).get("usd", 0) or 0) if pair else 0.0
+    if liq > 50_000:   score += 20; parts.append(f"Liq ${liq:,.0f}(+20)")
+    elif liq > 20_000: score += 15; parts.append(f"Liq ${liq:,.0f}(+15)")
+    elif liq > 10_000: score += 10; parts.append(f"Liq ${liq:,.0f}(+10)")
+    elif liq > 5_000:  score += 5;  parts.append(f"Liq ${liq:,.0f}(+5)")
+
+    vol5  = float((pair.get("volume") or {}).get("m5", 0) or 0) if pair else 0.0
+    mcap  = float(pair.get("marketCap", 0) or pair.get("fdv", 0) or 0) if pair else 0.0
+    if mcap == 0 and pumpfun:
+        mcap = pumpfun.get("market_cap", 0)
+    ratio = (vol5 / mcap * 100) if mcap > 0 else 0
+    if ratio > 50:   score += 20; parts.append(f"Vol/MCap {ratio:.0f}%(+20)")
+    elif ratio > 30: score += 15; parts.append(f"Vol/MCap {ratio:.0f}%(+15)")
+    elif ratio > 10: score += 10; parts.append(f"Vol/MCap {ratio:.0f}%(+10)")
+
+    age_min = pumpfun.get("age_min", 999) if pumpfun else 999.0
+    if pair and age_min == 999:
+        cat = pair.get("pairCreatedAt", 0)
+        if cat:
+            age_min = (datetime.utcnow() - datetime.utcfromtimestamp(cat / 1000)).total_seconds() / 60
+    if age_min < 2:    score += 15; parts.append(f"Age {age_min:.1f}min(+15)")
+    elif age_min < 5:  score += 10; parts.append(f"Age {age_min:.1f}min(+10)")
+    elif age_min < 10: score += 5;  parts.append(f"Age {age_min:.1f}min(+5)")
+
+    holders = int((gp or {}).get("holder_count", 0) or 0)
+    if holders > 500:   score += 15; parts.append(f"Holders {holders}(+15)")
+    elif holders > 200: score += 10; parts.append(f"Holders {holders}(+10)")
+    elif holders > 100: score += 5;  parts.append(f"Holders {holders}(+5)")
+
+    price5 = float((pair.get("priceChange") or {}).get("m5", 0) or 0) if pair else 0.0
+    if price5 > 20:   score += 15; parts.append(f"+{price5:.0f}%/5min(+15)")
+    elif price5 > 10: score += 10; parts.append(f"+{price5:.0f}%/5min(+10)")
+    elif price5 > 5:  score += 5;  parts.append(f"+{price5:.0f}%/5min(+5)")
+
+    if gp is None:
+        score += 5; parts.append("GoPlus N/A(+5)")
+    elif goplus_minor_flags(gp) == 0:
+        score += 15; parts.append("GoPlus clean(+15)")
+    else:
+        score += 5; parts.append("GoPlus mineur(+5)")
+
+    if tg_bonus:
+        score += 15; parts.append("TG 3 canaux(+15)")
+
+    return score, " | ".join(parts)
+
+
+# ─── Jupiter buy/sell ─────────────────────────────────────────
+async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: float) -> tuple[bool, str, int]:
+    """Achète via USDC. Retourne (success, sig, quantity_raw)."""
+    kp = get_keypair()
+    if not kp:
+        return False, "keypair manquant", 0
+    amount_raw = int(amount_usdc * 10**USDC_DECIMALS)
+    quote_url = (
+        f"https://quote-api.jup.ag/v6/quote"
+        f"?inputMint={USDC_MINT}&outputMint={mint}"
+        f"&amount={amount_raw}&slippageBps={SLIPPAGE_BPS}"
+    )
+    quote = await fetch_json(session, quote_url)
+    if not quote or "error" in quote:
+        return False, f"quote échoué: {quote}", 0
+    swap = await post_json(session, "https://quote-api.jup.ag/v6/swap", {
+        "quoteResponse":    quote,
+        "userPublicKey":    str(kp.pubkey()),
+        "wrapAndUnwrapSol": True,
+    })
+    if not swap or "swapTransaction" not in swap:
+        return False, "swap échoué", 0
+    try:
+        from solders.transaction import VersionedTransaction
+        from solana.rpc.async_api import AsyncClient
+        raw     = base64.b64decode(swap["swapTransaction"])
+        tx      = VersionedTransaction.from_bytes(raw)
+        signed  = VersionedTransaction(tx.message, [kp])
+        async with AsyncClient(HELIUS_RPC_URL) as client:
+            result = await client.send_raw_transaction(bytes(signed))
+        sig = str(result.value)
+        qty_raw = int(quote.get("outAmount", 0))
+        logger.info(f"BUY {mint[:8]} qty_raw={qty_raw} sig={sig[:12]}")
+        return True, sig, qty_raw
+    except Exception as e:
+        logger.error(f"jupiter_buy sign/send: {e}")
+        return False, str(e), 0
+
+
+async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) -> tuple[bool, str, float]:
+    """Vend qty_raw tokens. Retourne (success, sig, usdc_received)."""
+    kp = get_keypair()
+    if not kp or qty_raw <= 0:
+        return False, "keypair/qty manquant", 0.0
+    quote_url = (
+        f"https://quote-api.jup.ag/v6/quote"
+        f"?inputMint={mint}&outputMint={USDC_MINT}"
+        f"&amount={qty_raw}&slippageBps={SLIPPAGE_BPS}"
+    )
+    quote = await fetch_json(session, quote_url)
+    if not quote or "error" in quote:
+        return False, f"quote vente échoué: {quote}", 0.0
+    swap = await post_json(session, "https://quote-api.jup.ag/v6/swap", {
+        "quoteResponse":    quote,
+        "userPublicKey":    str(kp.pubkey()),
+        "wrapAndUnwrapSol": True,
+    })
+    if not swap or "swapTransaction" not in swap:
+        return False, "swap vente échoué", 0.0
+    try:
+        from solders.transaction import VersionedTransaction
+        from solana.rpc.async_api import AsyncClient
+        raw    = base64.b64decode(swap["swapTransaction"])
+        tx     = VersionedTransaction.from_bytes(raw)
+        signed = VersionedTransaction(tx.message, [kp])
+        async with AsyncClient(HELIUS_RPC_URL) as client:
+            result = await client.send_raw_transaction(bytes(signed))
+        sig = str(result.value)
+        usdc = int(quote.get("outAmount", 0)) / 10**USDC_DECIMALS
+        logger.info(f"SELL {mint[:8]} usdc={usdc:.2f} sig={sig[:12]}")
+        return True, sig, usdc
+    except Exception as e:
+        logger.error(f"jupiter_sell sign/send: {e}")
+        return False, str(e), 0.0
+
+
+# ─── Prix actuel ─────────────────────────────────────────────
+async def get_token_price_usd(session: aiohttp.ClientSession, mint: str) -> float:
+    pair = await fetch_dexscreener_pair(session, mint)
+    if not pair:
+        return 0.0
+    return float(pair.get("priceUsd", 0) or 0)
+
+
+# ─── Gestion de position ──────────────────────────────────────
+def open_pos(mint: str, symbol: str, amount_usdc: float, entry_price: float,
+             qty_raw: int, score: int, reasons: str, sig: str):
+    positions[mint] = {
+        "mint":          mint,
+        "symbol":        symbol,
+        "amount_usdc":   amount_usdc,
+        "entry_price":   entry_price,
+        "qty_raw":       qty_raw,
+        "peak_price":    entry_price,
+        "half_sold":     False,
+        "pyramid_count": 0,
+        "last_pyramid":  None,
+        "score":         score,
+        "reasons":       reasons,
+        "sig":           sig,
+        "opened_at":     datetime.utcnow().isoformat(),
+    }
+    _save_state()
+
+
+def close_pos(mint: str):
+    if mint in positions:
+        del positions[mint]
+    blacklist.add(mint)
+    _save_state()
+
+
+async def check_position(session: aiohttp.ClientSession, mint: str):
+    pos = positions.get(mint)
+    if not pos:
+        return
+    current = await get_token_price_usd(session, mint)
+    if current <= 0:
+        return
+
+    entry  = pos["entry_price"]
+    peak   = pos["peak_price"]
+    qty    = pos["qty_raw"]
+    symbol = pos["symbol"]
+    pct_e  = (current - entry) / entry * 100
+    pct_p  = (current - peak) / peak * 100
+
+    if current > peak:
+        positions[mint]["peak_price"] = current
+        _save_state()
+        peak = current
+
+    # Take profit partiel +50% → vendre 50%
+    if not pos["half_sold"] and pct_e >= TP_HALF_PCT:
+        half = qty // 2
+        ok, sig, usdc = await jupiter_sell(session, mint, half)
+        if ok:
+            pnl = usdc - pos["amount_usdc"] * 0.5
+            positions[mint]["half_sold"]  = True
+            positions[mint]["qty_raw"]   -= half
+            positions[mint]["amount_usdc"] *= 0.5
+            _save_state()
+            await send_tg(
+                f"SOLANA VENTE 50%\n\n"
+                f"Token  : {symbol}\n"
+                f"Raison : Take profit +{TP_HALF_PCT:.0f}%\n"
+                f"USDC   : {usdc:.2f}\n"
+                f"P&L    : {pnl:+.2f} USDC"
+            )
+        return
+
+    # Take profit total +100%
+    if pct_e >= TP_FULL_PCT:
+        ok, sig, usdc = await jupiter_sell(session, mint, qty)
+        if ok:
+            pnl = usdc - pos["amount_usdc"]
+            await send_tg(
+                f"SOLANA VENTE TOTALE\n\n"
+                f"Token  : {symbol}\n"
+                f"Raison : Take profit +{TP_FULL_PCT:.0f}%\n"
+                f"USDC   : {usdc:.2f}\n"
+                f"P&L    : {pnl:+.2f} USDC"
+            )
+            close_pos(mint)
+        return
+
+    # Trailing stop −25% depuis le pic (actif seulement si pic a dépassé +50%)
+    peak_pct_entry = (peak - entry) / entry * 100
+    if peak_pct_entry >= TP_HALF_PCT and pct_p <= -TRAILING_PCT:
+        ok, sig, usdc = await jupiter_sell(session, mint, qty)
+        if ok:
+            pnl = usdc - pos["amount_usdc"]
+            await send_tg(
+                f"SOLANA TRAILING STOP\n\n"
+                f"Token  : {symbol}\n"
+                f"Raison : Trailing -{TRAILING_PCT:.0f}% depuis pic\n"
+                f"USDC   : {usdc:.2f}\n"
+                f"P&L    : {pnl:+.2f} USDC"
+            )
+            close_pos(mint)
+        return
+
+    # Stop loss −30%
+    if pct_e <= STOP_LOSS_PCT:
+        ok, sig, usdc = await jupiter_sell(session, mint, qty)
+        if ok:
+            pnl = usdc - pos["amount_usdc"]
+            await send_tg(
+                f"SOLANA STOP LOSS\n\n"
+                f"Token  : {symbol}\n"
+                f"Raison : Stop loss {STOP_LOSS_PCT:.0f}%\n"
+                f"USDC   : {usdc:.2f}\n"
+                f"P&L    : {pnl:+.2f} USDC"
+            )
+            close_pos(mint)
+
+
+# ─── Pyramiding ───────────────────────────────────────────────
+async def check_pyramid(session: aiohttp.ClientSession, mint: str):
+    pos = positions.get(mint)
+    if not pos or pos.get("pyramid_count", 0) >= MAX_PYRAMIDS:
+        return
+    last = pos.get("last_pyramid")
+    if last:
+        elapsed = (datetime.utcnow() - datetime.fromisoformat(last)).total_seconds()
+        if elapsed < PYRAMID_COOL:
+            return
+    current = await get_token_price_usd(session, mint)
+    if current <= 0:
+        return
+    pct = (current - pos["entry_price"]) / pos["entry_price"] * 100
+    if pct < PYRAMID_TRIGGER:
+        return
+    usdc_bal = await get_usdc_balance()
+    if usdc_bal < PYRAMID_USDC:
+        return
+    ok, sig, qty_raw = await jupiter_buy(session, mint, PYRAMID_USDC)
+    if ok:
+        n = pos.get("pyramid_count", 0) + 1
+        positions[mint]["qty_raw"]       += qty_raw
+        positions[mint]["amount_usdc"]   += PYRAMID_USDC
+        positions[mint]["pyramid_count"]  = n
+        positions[mint]["last_pyramid"]   = datetime.utcnow().isoformat()
+        _save_state()
+        await send_tg(
+            f"SOLANA PYRAMIDING\n\n"
+            f"Token  : {pos['symbol']}\n"
+            f"+{pct:.1f}% depuis entrée\n"
+            f"Ajout  : {PYRAMID_USDC} USDC (pyramide {n}/{MAX_PYRAMIDS})"
+        )
+
+
+# ─── Signal Telegram ──────────────────────────────────────────
+def has_tg_signal(mint: str) -> bool:
+    cutoff   = datetime.utcnow() - timedelta(seconds=SIGNAL_WINDOW)
+    channels = {ch for ch, ts_list in tg_mentions[mint].items()
+                if any(t > cutoff for t in ts_list)}
+    return len(channels) >= SIGNAL_THRESHOLD
+
+
+# ─── Traitement d'un token candidat ─────────────────────────
+async def process_token(session: aiohttp.ClientSession, mint: str,
+                        symbol: str, pumpfun: dict | None):
+    if mint in blacklist or mint in positions:
+        return
+
+    pf_age = pumpfun.get("age_min", 999) if pumpfun else 999.0
+
+    pair = await fetch_dexscreener_pair(session, mint)
+    liq  = float((pair.get("liquidity") or {}).get("usd", 0) or 0) if pair else 0.0
+    vol5 = float((pair.get("volume") or {}).get("m5", 0) or 0) if pair else 0.0
+
+    age_min = pf_age
+    if pair and age_min == 999:
+        cat = pair.get("pairCreatedAt", 0)
+        if cat:
+            age_min = (datetime.utcnow() - datetime.utcfromtimestamp(cat / 1000)).total_seconds() / 60
+
+    if age_min > 10 or liq < 5_000 or (vol5 < 1_000 and not has_tg_signal(mint)):
+        blacklist.add(mint)
+        _save_state()
+        return
+
+    gp = await check_goplus(session, mint)
+    if gp:
+        flags = goplus_red_flags(gp)
+        if flags:
+            logger.info(f"Rejeté GoPlus {symbol} ({mint[:8]}): {flags}")
+            blacklist.add(mint)
+            _save_state()
+            return
+
+    tg_bonus = has_tg_signal(mint)
+    score, reasons = compute_score(pair, pumpfun, gp, tg_bonus)
+
+    if score < 65:
+        blacklist.add(mint)
+        _save_state()
+        return
+
+    if len(positions) >= MAX_POSITIONS:
+        return
+    if sum(p["amount_usdc"] for p in positions.values()) + TRADE_USDC > MAX_TOTAL_USDC:
+        return
+
+    usdc_bal = await get_usdc_balance()
+    if usdc_bal < MIN_USDC:
+        await send_tg(f"SOLANA BOT — Solde USDC bas ({usdc_bal:.2f}). Achats suspendus.")
+        return
+
+    ok, sig, qty_raw = await jupiter_buy(session, mint, TRADE_USDC)
+    if not ok or qty_raw == 0:
+        blacklist.add(mint)
+        _save_state()
+        return
+
+    entry_price = float((pair or {}).get("priceUsd", 0) or 0)
+    if entry_price <= 0:
+        entry_price = TRADE_USDC / (qty_raw / 10**6) if qty_raw > 0 else 0
+    open_pos(mint, symbol, TRADE_USDC, entry_price, qty_raw, score, reasons, sig)
+
+    await send_tg(
+        f"SOLANA ACHAT\n\n"
+        f"Token   : {symbol}\n"
+        f"Adresse : {mint}\n"
+        f"Montant : {TRADE_USDC} USDC\n"
+        f"Score   : {score}/100\n"
+        f"Raisons : {reasons}"
+    )
+
+
+# ─── Boucle scanner ───────────────────────────────────────────
+async def scanner_loop():
+    await asyncio.sleep(15)
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                pf_tokens = await fetch_pumpfun_new(session)
+                ds_tokens = await fetch_dexscreener_new(session)
+
+                seen = set()
+                for tok in pf_tokens:
+                    mint = tok["address"]
+                    if mint not in seen:
+                        seen.add(mint)
+                        await process_token(session, mint, tok.get("symbol", "?"), tok)
+                        await asyncio.sleep(0.5)
+
+                for tok in ds_tokens:
+                    mint = tok["address"]
+                    if mint not in seen:
+                        seen.add(mint)
+                        await process_token(session, mint, "?", None)
+                        await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"scanner_loop: {e}")
+        await asyncio.sleep(SCAN_INTERVAL)
+
+
+# ─── Boucle monitoring des positions ─────────────────────────
+async def monitor_loop():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                for mint in list(positions.keys()):
+                    await check_position(session, mint)
+                    await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"monitor_loop: {e}")
+        await asyncio.sleep(MONITOR_INTERVAL)
+
+
+# ─── Boucle pyramiding ────────────────────────────────────────
+async def pyramid_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                for mint in list(positions.keys()):
+                    await check_pyramid(session, mint)
+                    await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"pyramid_loop: {e}")
+        await asyncio.sleep(PYRAMID_INTERVAL)
+
+
+# ─── Boucle Telethon ─────────────────────────────────────────
+async def telethon_loop():
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        logger.info("Telethon désactivé (variables manquantes)")
+        return
+    if not os.path.exists("solana_bot_session.session"):
+        logger.warning(
+            "Telethon : pas de session. Lancez `python solana_bot.py --auth` "
+            "en local pour vous authentifier."
+        )
+        return
+    try:
+        from telethon import TelegramClient, events
+        client = TelegramClient("solana_bot_session", int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+
+        @client.on(events.NewMessage(chats=CHANNELS))
+        async def on_msg(event):
+            text    = event.raw_text or ""
+            channel = getattr(event.chat, "username", "unknown")
+            for addr in SOL_ADDR_RE.findall(text):
+                if 32 <= len(addr) <= 44:
+                    tg_mentions[addr][channel].append(datetime.utcnow())
+                    logger.debug(f"Signal TG {addr[:8]} @{channel}")
+
+        await client.start()
+        logger.info("Telethon connecté — écoute des canaux crypto")
+        await client.run_until_disconnected()
+    except Exception as e:
+        logger.error(f"telethon_loop: {e}")
+
+
+# ─── Auth locale (one-shot) ───────────────────────────────────
+async def auth_telethon():
+    """Lance l'authentification Telethon interactive (à faire une seule fois en local)."""
+    from telethon import TelegramClient
+    client = TelegramClient("solana_bot_session", int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+    await client.start()
+    print(f"Authentifié : {await client.get_me()}")
+    await client.disconnect()
+
+
+# ─── Main ─────────────────────────────────────────────────────
+async def main():
+    _load_state()
+    kp = get_keypair()
+    if not kp:
+        logger.error("Keypair Solana invalide — bot démarré sans capacité de trade")
+    else:
+        logger.info(f"Wallet : {kp.pubkey()}")
+
+    await send_tg("SOLANA MEMECOIN BOT DÉMARRÉ\nScan DexScreener + Pump.fun actif")
+
+    await asyncio.gather(
+        scanner_loop(),
+        monitor_loop(),
+        pyramid_loop(),
+        telethon_loop(),
+    )
+
+
+if __name__ == "__main__":
+    import sys
+    if "--auth" in sys.argv:
+        asyncio.run(auth_telethon())
+    else:
+        asyncio.run(main())
