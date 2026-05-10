@@ -600,16 +600,24 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         quantite = (amount_eur / current_price) if current_price else balance
         quantite = round_quantity(min(quantite, balance))
 
+        # Formatage explicite avant envoi a Coinbase (evite str(float) a 15 decimales)
+        if quantite > 1:
+            qty_str = f"{quantite:.4f}"
+        elif quantite > 0.01:
+            qty_str = f"{quantite:.6f}"
+        else:
+            qty_str = f"{quantite:.8f}"
+
         is_usdc = product_id.endswith("-USDC")
         if is_usdc:
             success, eur_recupere, sell_price, order_id = await place_market_sell_usdc(
-                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, quantite
+                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, qty_str
             )
             if not sell_price:
                 sell_price = current_price
         else:
             success, order_id, _ = await place_market_sell(
-                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, quantite
+                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, qty_str
             )
             sell_price = current_price
 

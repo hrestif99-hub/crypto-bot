@@ -420,8 +420,10 @@ async def place_market_sell_usdc(api_key, api_secret, product_id_usdc, quantity)
     Retourne (success, eur_recupere, sell_price, message)
     """
     # 1. Vendre le coin → USDC
+    qty_str = _format_quantity(float(quantity))
+    logger.info(f"[place_market_sell_usdc] {product_id_usdc} quantite={qty_str}")
     success, order_id, data = await place_market_sell(
-        api_key, api_secret, product_id_usdc, quantity
+        api_key, api_secret, product_id_usdc, qty_str
     )
     if not success:
         return False, 0, 0, order_id
