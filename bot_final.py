@@ -1108,7 +1108,27 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── Boucles automatiques ─────────────────────────────────────
+async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Commande debug pour verifier que TRADES_DATA est bien lu."""
+    import os
+    trades_raw = os.environ.get("TRADES_DATA", "NON DEFINI")
+    trades = get_active_trades()
+
+    msg = (
+        f"DEBUG\n\n"
+        f"TRADES_DATA defini : {'OUI' if trades_raw != 'NON DEFINI' else 'NON'}\n"
+        f"TRADES_DATA longueur : {len(trades_raw)} caracteres\n"
+        f"TRADES_DATA debut : {trades_raw[:100]}\n\n"
+        f"Trades actifs trouves : {len(trades)}\n"
+    )
+    if trades:
+        for key, t in trades.items():
+            msg += f"- {t['symbol']} : {t['amount_eur']}€\n"
+
+    await update.message.reply_text(msg)
+
+
+
 
 async def monitoring_loop(app):
     while True:
@@ -1163,6 +1183,7 @@ async def morning_recap(app):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    app.add_handler(CommandHandler("debug",        cmd_debug))
     app.add_handler(CommandHandler("start",        cmd_start))
     app.add_handler(CommandHandler("help",         cmd_start))
     app.add_handler(CommandHandler("recap",        cmd_recap))
