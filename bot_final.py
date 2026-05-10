@@ -525,6 +525,102 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             + warning
         )
 
+    # ── Vente manuelle ────────────────────────────────────────
+    elif data.startswith("sell_select_"):
+        # L'utilisateur a choisi quelle entree vendre
+        trade_key = data.replace("sell_select_", "")
+        trades    = get_active_trades()
+        if trade_key not in trades:
+            await query.edit_message_text("Ce trade n'existe plus.")
+            return
+        trade         = trades[trade_key]
+        current_price = await get_product_price(trade["product_id"], COINBASE_API_KEY, COINBASE_API_SECRET)
+        val_actuelle  = (trade["quantity"] * current_price) if current_price else 0
+
+        ctx.user_data["pending_sell"] = trade_key
+        await query.edit_message_text(
+            f"Combien veux-tu vendre ?\n\n"
+            f"Crypto   : {trade['symbol']}\n"
+            f"Investi  : {trade['amount_eur']:.2f} EUR\n"
+            f"Valeur actuelle : {val_actuelle:.2f} EUR\n\n"
+            f"Reponds avec un montant en euros (max {val_actuelle:.2f} EUR)"
+        )
+
+    elif data.startswith("sell_confirm_"):
+        # L'utilisateur confirme la vente
+        parts     = data.split("_")
+        trade_key = parts[2]
+        amount_eur = float(parts[3])
+
+        trades = get_active_trades()
+        if trade_key not in trades:
+            await query.edit_message_text("Ce trade n'existe plus.")
+            return
+
+        trade         = trades[trade_key]
+        symbol        = trade["symbol"]
+        product_id    = trade["product_id"]
+        current_price = await get_product_price(product_id, COINBASE_API_KEY, COINBASE_API_SECRET)
+
+        if not current_price:
+            await query.edit_message_text(f"Prix introuvable pour {symbol}. Reessaie.")
+            return
+
+        # Calcul de la quantite a vendre selon le montant en euros
+        quantite_totale = trade["quantity"]
+        val_totale      = quantite_totale * current_price
+        ratio_vente     = min(amount_eur / val_totale, 1.0)
+        quantite_vendre = quantite_totale * ratio_vente
+
+        await query.edit_message_text(f"Vente de {amount_eur:.2f} EUR de {symbol} en cours...")
+
+        success, order_id, _ = await place_market_sell(
+            COINBASE_API_KEY, COINBASE_API_SECRET, product_id, quantite_vendre
+        )
+
+        if success:
+            entry_price = trade["entry_price"]
+            pnl_eur     = (current_price - entry_price) * quantite_vendre
+            pnl_pct     = ((current_price - entry_price) / entry_price) * 100
+            signe       = "+" if pnl_eur >= 0 else ""
+
+            # Vente partielle ou totale ?
+            if ratio_vente >= 0.99:
+                # Vente totale : on clos le trade
+                close_trade(trade_key, current_price, "Vente manuelle")
+                reste_msg = "Position entierement fermee."
+            else:
+                # Vente partielle : on met a jour la quantite restante
+                trades_all = get_active_trades()
+                from trader import load_trades, save_trades
+                all_t = load_trades()
+                if trade_key in all_t:
+                    all_t[trade_key]["quantity"]   -= quantite_vendre
+                    all_t[trade_key]["amount_eur"] -= amount_eur
+                    save_trades(all_t)
+                reste_eur = (quantite_totale - quantite_vendre) * current_price
+                reste_msg = f"Reste en portefeuille : {reste_eur:.2f} EUR"
+
+            await ctx.bot.send_message(
+                chat_id=CHAT_ID,
+                text=(
+                    f"VENTE EFFECTUEE\n\n"
+                    f"Crypto  : {symbol}\n"
+                    f"Vendu   : {amount_eur:.2f} EUR\n"
+                    f"Prix    : {current_price:,.4f} EUR\n"
+                    f"P&L     : {signe}{pnl_eur:.2f} EUR ({signe}{pnl_pct:.1f}%)\n"
+                    f"{reste_msg}"
+                )
+            )
+        else:
+            await ctx.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"Erreur vente {symbol} : {order_id}"
+            )
+
+    elif data.startswith("sell_cancel_"):
+        await query.edit_message_text("Vente annulee.")
+
     elif data.startswith("confirm_buy_"):
         parts      = data.split("_")
         product_id = parts[2]
@@ -600,6 +696,94 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
+    # ── Déclencheur vente manuelle ────────────────────────────
+    if text.lower() in ["#vendre", "#vente", "#sell"]:
+        trades = get_active_trades()
+        if not trades:
+            await update.message.reply_text("Aucun trade actif en ce moment.")
+            return
+
+        # Grouper par coin pour affichage clair
+        coins_trades = {}
+        for key, trade in trades.items():
+            symbol = trade["symbol"]
+            if symbol not in coins_trades:
+                coins_trades[symbol] = []
+            coins_trades[symbol].append((key, trade))
+
+        msg = "Quelle position veux-tu vendre ?\n\n"
+        buttons = []
+
+        for symbol, entries in coins_trades.items():
+            product_id    = entries[0][1]["product_id"]
+            current_price = await get_product_price(product_id, COINBASE_API_KEY, COINBASE_API_SECRET)
+
+            for i, (key, trade) in enumerate(entries, 1):
+                entry_price  = trade["entry_price"]
+                investi      = trade["amount_eur"]
+                date         = trade.get("date", "?")
+                val_actuelle = (trade["quantity"] * current_price) if current_price else 0
+
+                if current_price and entry_price:
+                    pct    = ((current_price - entry_price) / entry_price) * 100
+                    signe  = "+" if pct >= 0 else ""
+                    label  = f"{symbol} — Entree {i} — {signe}{pct:.1f}% — {investi:.0f} EUR"
+                else:
+                    label  = f"{symbol} — Entree {i} — prix indispo — {investi:.0f} EUR"
+
+                buttons.append([InlineKeyboardButton(label, callback_data=f"sell_select_{key}")])
+
+        reply_markup = InlineKeyboardMarkup(buttons)
+        await update.message.reply_text(msg, reply_markup=reply_markup)
+        return
+
+    # ── Montant de vente apres selection ─────────────────────
+    if "pending_sell" in ctx.user_data:
+        trade_key = ctx.user_data["pending_sell"]
+        try:
+            amount = float(text.replace(",", ".").replace("€", "").strip())
+            if amount <= 0:
+                await update.message.reply_text("Le montant doit etre positif.")
+                return
+
+            trades = get_active_trades()
+            if trade_key not in trades:
+                await update.message.reply_text("Ce trade n'existe plus.")
+                del ctx.user_data["pending_sell"]
+                return
+
+            trade         = trades[trade_key]
+            symbol        = trade["symbol"]
+            current_price = await get_product_price(trade["product_id"], COINBASE_API_KEY, COINBASE_API_SECRET)
+            val_actuelle  = (trade["quantity"] * current_price) if current_price else 0
+
+            if amount > val_actuelle:
+                await update.message.reply_text(
+                    f"Maximum {val_actuelle:.2f} EUR (valeur actuelle de ta position)."
+                )
+                return
+
+            keyboard = [[
+                InlineKeyboardButton(f"Confirmer vente {amount:.2f} EUR", callback_data=f"sell_confirm_{trade_key}_{amount}"),
+                InlineKeyboardButton("Annuler", callback_data=f"sell_cancel_{trade_key}")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            quantite_vendre = (amount / current_price) if current_price else 0
+            await update.message.reply_text(
+                f"Confirmer la vente ?\n\n"
+                f"Crypto   : {symbol}\n"
+                f"Montant  : {amount:.2f} EUR\n"
+                f"Prix actuel : {current_price:,.4f} EUR\n"
+                f"Quantite : {quantite_vendre:.6f} {symbol}",
+                reply_markup=reply_markup
+            )
+            del ctx.user_data["pending_sell"]
+
+        except ValueError:
+            await update.message.reply_text("Envoie juste un nombre, ex: 10")
+        return
+
     if "pending_buy" in ctx.user_data:
         product_id = ctx.user_data["pending_buy"]
         try:
@@ -661,9 +845,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/portefeuille — Ton solde Coinbase\n"
         "/scanner     — Scan manuel opportunites\n"
         "/nouveautes  — Nouvelles cryptos listees\n"
-        "/buy BTC 500 65000 — Position manuelle\n"
         "/prix BTC ETH SOL  — Prix actuels\n"
-        "/historique  — Tes trades passes\n\n"
+        "/historique  — Tes trades passes\n"
+        "#vendre      — Vendre une position\n\n"
         "Ou envoie un screenshot de ton trade !\n\n"
         "Profils de trading :\n"
         "STANDARD      : stop -25%  | trailing -15% | max 50 EUR\n"
