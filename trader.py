@@ -121,6 +121,8 @@ def add_trade(product_id, symbol, amount_eur, entry_price, quantity, order_id,
         # Compteur anti-wick : pour ULTRA VOLATILE, on demande 2 bougies
         # consecutives sous le stop avant de vendre (evite les faux declenchements)
         "stop_loss_confirmations": 0,
+        "pyramid_count":           0,
+        "last_pyramid_time":       None,
     }
     save_trades(trades)
     logger.info(
@@ -203,6 +205,19 @@ def increment_stop_confirmation(key):
         )
         save_trades(trades)
     return trades.get(key, {}).get("stop_loss_confirmations", 0)
+
+
+def update_pyramid(key, added_quantity, added_cost):
+    """Enregistre un achat pyramide. Retourne le nouveau pyramid_count."""
+    trades = load_trades()
+    if key not in trades:
+        return 0
+    trades[key]["pyramid_count"]     = trades[key].get("pyramid_count", 0) + 1
+    trades[key]["last_pyramid_time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    trades[key]["quantity"]          = trades[key]["quantity"] + added_quantity
+    trades[key]["amount_eur"]        = trades[key]["amount_eur"] + added_cost
+    save_trades(trades)
+    return trades[key]["pyramid_count"]
 
 
 def reset_stop_confirmation(key):

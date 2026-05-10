@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import aiohttp
 
-from signals import analyze_signals
+from signals import analyze_signals, get_coingecko_trending
 from coinbase import (
     get_available_products, get_product_price, get_eur_balance,
     place_market_buy, place_market_sell, get_portfolio,
@@ -18,7 +18,7 @@ from coinbase import (
 from trader import (
     add_trade, update_trade_peak, should_sell, close_trade,
     get_active_trades, get_closed_trades, get_trade_summary,
-    increment_stop_confirmation, reset_stop_confirmation
+    increment_stop_confirmation, reset_stop_confirmation, update_pyramid
 )
 
 # ─── Configuration ───────────────────────────────────────────
@@ -274,6 +274,11 @@ def build_opportunity_message(symbol, analysis):
     obv_up  = analysis.get("obv_haussier", False)
     obv_acc = analysis.get("obv_acceleration", 0)
 
+    trending_label = "TOP TRENDING CoinGecko 🔥\n" if analysis.get("is_coingecko_trending") else ""
+    reddit_n       = analysis.get("reddit_mentions", 0)
+    reddit_label   = f"Reddit : {reddit_n} mentions 24h\n" if reddit_n > 20 else ""
+    extra_labels   = trending_label + reddit_label
+
     signaux_str = "\n".join(f"+ {s}" for s in analysis["signaux"])
     alertes_str = (
         "\n\nAlertes :\n" + "\n".join(f"! {a}" for a in analysis["alertes"])
@@ -301,6 +306,7 @@ def build_opportunity_message(symbol, analysis):
         msg = (
             f"ULTRA VOLATILE — OPPORTUNITE DETECTEE\n"
             f"{'=' * 34}\n\n"
+            f"{extra_labels}"
             f"Crypto    : {symbol}\n"
             f"Prix      : {analysis['price']:,.6f} EUR\n"
             f"Timeframe : {timeframe}\n"
@@ -329,6 +335,7 @@ def build_opportunity_message(symbol, analysis):
         # ── Message STANDARD ──────────────────────────────────
         msg = (
             f"OPPORTUNITE DETECTEE\n\n"
+            f"{extra_labels}"
             f"Crypto : {symbol}\n"
             f"Prix   : {analysis['price']:,.4f} EUR\n"
             f"Score  : {analysis['score']}/{analysis['score_max']} [{barre}] {analysis['niveau']}\n\n"
@@ -413,6 +420,37 @@ async def monitor_trades(app):
                         chat_id=CHAT_ID,
                         text=f"Erreur vente {trade['symbol']} : {order_id}\nVendez manuellement !"
                     )
+
+            # ── Pyramiding automatique (paires USDC uniquement) ───
+            elif decision is False and product_id.endswith("-USDC"):
+                entry_price   = trade["entry_price"]
+                pyramid_count = trade.get("pyramid_count", 0)
+                last_pyr      = trade.get("last_pyramid_time")
+                if entry_price and entry_price > 0:
+                    pct_from_entry = ((current_price - entry_price) / entry_price) * 100
+                    enough_time = True
+                    if last_pyr:
+                        try:
+                            elapsed = (datetime.now() - datetime.strptime(last_pyr, "%Y-%m-%d %H:%M")).total_seconds() / 60
+                            enough_time = elapsed >= 60
+                        except Exception:
+                            pass
+                    if pct_from_entry >= 15.0 and pyramid_count < 3 and enough_time:
+                        usdc_bal = await get_usdc_balance(COINBASE_API_KEY, COINBASE_API_SECRET)
+                        if usdc_bal >= 2.0:
+                            ok, qty_new, _, _ = await place_market_buy_usdc(
+                                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, 2.0
+                            )
+                            if ok and qty_new > 0:
+                                new_count = update_pyramid(key, qty_new, 2.0)
+                                await app.bot.send_message(
+                                    chat_id=CHAT_ID,
+                                    text=(
+                                        f"PYRAMIDING AUTO : {trade['symbol']} +{pct_from_entry:.1f}%"
+                                        f" — 2 USDC ajoutés (pyramide {new_count}/3)"
+                                    )
+                                )
+
         except Exception as e:
             logger.error(f"Erreur monitoring trade {key}: {e}")
 
@@ -433,6 +471,9 @@ async def scan_opportunities(app):
             reverse=True
         )[:300]
 
+        trending_symbols = await get_coingecko_trending()
+        logger.info(f"[scan] CoinGecko trending : {trending_symbols}")
+
         opportunities = []
         for product in products:
             product_id = product.get("product_id", "?")
@@ -443,7 +484,8 @@ async def scan_opportunities(app):
                 analysis = await analyze_signals(
                     product_id, COINBASE_API_KEY, COINBASE_API_SECRET,
                     volume_24h=volume_24h,
-                    market_cap=market_cap
+                    market_cap=market_cap,
+                    trending_symbols=trending_symbols,
                 )
                 if not analysis:
                     continue

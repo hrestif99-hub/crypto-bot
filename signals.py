@@ -262,7 +262,47 @@ def detect_inactivity_wakeup(volumes, closes, inactivity_periods=20, spike_facto
     return is_wakeup, round(inactivity_pct, 1), round(spike_ratio, 1)
 
 
-async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_cap=0):
+async def get_coingecko_trending():
+    """Retourne la liste uppercase des symbols trending sur CoinGecko."""
+    url = "https://api.coingecko.com/api/v3/search/trending"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                raw = await r.read()
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    return []
+                return [c["item"]["symbol"].upper() for c in data.get("coins", []) if "item" in c]
+    except Exception as e:
+        logger.error(f"[get_coingecko_trending] {e}")
+        return []
+
+
+async def get_reddit_mentions(symbol):
+    """Compte les posts Reddit mentionnant le symbol dans les 24h via recherche globale."""
+    url = (
+        f"https://www.reddit.com/search.json"
+        f"?q={symbol}+crypto&sort=new&t=day&limit=100"
+    )
+    headers = {"User-Agent": "crypto-bot/1.0"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                raw = await r.read()
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    return 0
+                posts = data.get("data", {}).get("children", [])
+                return len(posts)
+    except Exception as e:
+        logger.error(f"[get_reddit_mentions] {symbol} : {e}")
+        return 0
+
+
+async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_cap=0,
+                           trending_symbols=None):
     """
     Analyse tous les signaux techniques pour un produit.
 
@@ -277,6 +317,11 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
       - Detection inactivite + reveil (coin mort qui se reveille = signal fort)
     """
     try:
+        # ── Donnees externes (trending / Reddit) ──────────────
+        symbol                = product_id.split("-")[0].upper()
+        is_coingecko_trending = symbol in (trending_symbols or [])
+        reddit_mentions       = await get_reddit_mentions(symbol)
+
         # ── Etape 1 : charge d'abord les bougies 15min ────────
         # On classifie sur 15min directement (Option C)
         # ATR sur 15min est bien plus sensible aux mouvements rapides
@@ -556,6 +601,9 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             "montant_max_eur":     montant_max,
             # Bypass : force l'alerte si +30% sur 24h peu importe le score
             "is_momentum_alert":   change_24h >= 30,
+            # Donnees externes
+            "is_coingecko_trending": is_coingecko_trending,
+            "reddit_mentions":       reddit_mentions,
         }
 
     except Exception as e:
