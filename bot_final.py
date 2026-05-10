@@ -21,6 +21,12 @@ from trader import (
 )
 
 # ─── Configuration ───────────────────────────────────────────
+print("=== DEBUG ENV VARS ===")
+for k, v in sorted(os.environ.items()):
+    masked = v[:4] + "***" if len(v) > 4 else "***"
+    print(f"  {k} = {masked}")
+print("=== END ENV VARS ===")
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 if not CHAT_ID:
