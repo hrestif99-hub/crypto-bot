@@ -430,7 +430,7 @@ async def scan_opportunities(app):
             products,
             key=lambda x: float(x.get("volume_24h", 0) or 0),
             reverse=True
-        )[:150]
+        )[:300]
 
         opportunities = []
         for product in products:
@@ -447,8 +447,8 @@ async def scan_opportunities(app):
                 if not analysis:
                     continue
 
-                # Seuil d'alerte adapte au profil (4 pour STANDARD, 5 pour ULTRA VOLATILE)
-                if analysis["score"] >= analysis["min_score_alerte"]:
+                # Seuil d'alerte adapte au profil, ou bypass si +40% sur 24h
+                if analysis["score"] >= analysis["min_score_alerte"] or analysis.get("is_momentum_alert"):
                     opportunities.append((product_id, symbol, analysis))
             except Exception as e:
                 logger.error(f"[scan_opportunities] {product_id} : {e}", exc_info=True)

@@ -485,11 +485,12 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             elif change_72h < -10:
                 alertes.append(f"Baisse 3j : {change_72h:.1f}%")
 
-            if 3 <= change_24h <= 25:
+            if change_24h >= 40:
+                score += 1
+                signaux.append(f"MOMENTUM FORT : +{change_24h:.1f}% sur 24h")
+            elif change_24h >= 3:
                 score += 1
                 signaux.append(f"Momentum 24h : +{change_24h:.1f}%")
-            elif change_24h > 30:
-                alertes.append(f"Hausse 24h trop forte ({change_24h:.1f}%)")
 
             if bullish_candles >= 2:
                 score += 1
@@ -553,6 +554,8 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0, market_
             "stop_loss_pct":       stop_loss_pct,
             "trailing_stop_pct":   trailing_stop,
             "montant_max_eur":     montant_max,
+            # Bypass : force l'alerte si +40% sur 24h peu importe le score
+            "is_momentum_alert":   change_24h >= 40,
         }
 
     except Exception as e:
