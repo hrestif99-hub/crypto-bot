@@ -7,147 +7,77 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-TRADES_FILE = "trades.json"
-
-# ─── Variables Railway pour persistance ──────────────────────
-# Railway API pour lire/ecrire les variables d'environnement
-RAILWAY_TOKEN   = os.environ.get("RAILWAY_API_KEY", "")
-RAILWAY_PROJECT = os.environ.get("RAILWAY_PROJECT_ID", "")
-RAILWAY_ENV     = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
-RAILWAY_SERVICE = os.environ.get("RAILWAY_SERVICE_ID", "")
-
-def _railway_available():
-    return bool(RAILWAY_TOKEN and RAILWAY_PROJECT and RAILWAY_ENV and RAILWAY_SERVICE)
+TRADES_FILE  = "trades.json"
+JSONBIN_ID   = os.environ.get("JSONBIN_BIN_ID", "")
+JSONBIN_KEY  = os.environ.get("JSONBIN_KEY", "")
+JSONBIN_URL  = f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}"
 
 
-def _fetch_railway_variable(name):
-    """Lit une variable Railway via l'API GraphQL en temps reel."""
-    if not _railway_available():
-        return None
-    query = """
-    query variables($projectId: String!, $environmentId: String!, $serviceId: String!) {
-      variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
-    }
-    """
-    variables = {
-        "projectId":     RAILWAY_PROJECT,
-        "environmentId": RAILWAY_ENV,
-        "serviceId":     RAILWAY_SERVICE,
-    }
-    payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
-    req = urllib.request.Request(
-        "https://backboard.railway.com/graphql/v2",
-        data=payload,
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {RAILWAY_TOKEN}",
-        },
-        method="POST"
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-            variables_data = result.get("data", {}).get("variables", {})
-            return variables_data.get(name)
-    except Exception as e:
-        logger.error(f"[fetch_railway_variable] Erreur : {e}")
-        return None
+def _jsonbin_available():
+    return bool(JSONBIN_ID and JSONBIN_KEY)
 
 
 def load_trades():
-    """
-    Charge les trades depuis :
-    1. API Railway en temps reel (persistant entre redeplois)
-    2. Variable d'environnement TRADES_DATA (fallback)
-    3. Fichier local trades.json (fallback final)
-    """
-    # Priorite 1 : API Railway en temps reel
-    if _railway_available():
-        raw = _fetch_railway_variable("TRADES_DATA")
-        if raw:
-            try:
-                trades = json.loads(raw)
-                # Sync local pour les autres fonctions
+    """Charge les trades depuis JSONBin (persistant) ou fichier local (fallback)."""
+    if _jsonbin_available():
+        try:
+            req = urllib.request.Request(
+                JSONBIN_URL + "/latest",
+                headers={
+                    "X-Master-Key": JSONBIN_KEY,
+                    "X-Bin-Meta":   "false",
+                },
+                method="GET"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+                trades = data.get("trades", data) if isinstance(data, dict) else {}
+                # Sync local
                 try:
                     with open(TRADES_FILE, "w", encoding="utf-8") as f:
                         json.dump(trades, f, indent=2, ensure_ascii=False)
                 except Exception:
                     pass
                 return trades
-            except json.JSONDecodeError as e:
-                logger.error(f"[load_trades] TRADES_DATA Railway invalide : {e}")
+        except Exception as e:
+            logger.error(f"[load_trades] JSONBin erreur : {e}")
 
-    # Priorite 2 : variable d'environnement au demarrage
-    raw = os.environ.get("TRADES_DATA", "")
-    if raw and raw != "{}":
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-
-    # Priorite 3 : fichier local
+    # Fallback fichier local
     if os.path.exists(TRADES_FILE):
         try:
             with open(TRADES_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            logger.error(f"[load_trades] Erreur lecture fichier : {e}")
-
+            logger.error(f"[load_trades] Erreur fichier : {e}")
     return {}
 
 
 def save_trades(trades):
-    """
-    Sauvegarde les trades :
-    1. Dans le fichier local trades.json (immédiat)
-    2. Met a jour la variable TRADES_DATA via Railway API (persistant)
-    """
-    # Toujours sauvegarder en local
+    """Sauvegarde les trades dans JSONBin et en local."""
+    # Local d'abord
     try:
         with open(TRADES_FILE, "w", encoding="utf-8") as f:
             json.dump(trades, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        logger.error(f"[save_trades] Erreur ecriture fichier : {e}")
+        logger.error(f"[save_trades] Erreur fichier : {e}")
 
-    # Mettre a jour la variable Railway si token disponible
-    if _railway_available():
+    # JSONBin
+    if _jsonbin_available():
         try:
-            _update_railway_variable("TRADES_DATA", json.dumps(trades, ensure_ascii=False))
+            payload = json.dumps({"trades": trades}, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                JSONBIN_URL,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Master-Key": JSONBIN_KEY,
+                },
+                method="PUT"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                logger.debug(f"[save_trades] JSONBin OK : {resp.status}")
         except Exception as e:
-            logger.error(f"[save_trades] Erreur mise a jour Railway : {e}")
-
-
-def _update_railway_variable(name, value):
-    """Met a jour une variable d'environnement Railway via l'API GraphQL."""
-    query = """
-    mutation upsertVariables($input: VariableCollectionUpsertInput!) {
-      variableCollectionUpsert(input: $input)
-    }
-    """
-    variables = {
-        "input": {
-            "projectId":     RAILWAY_PROJECT,
-            "environmentId": RAILWAY_ENV,
-            "serviceId":     RAILWAY_SERVICE,
-            "variables":     {name: value}
-        }
-    }
-    payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
-    req = urllib.request.Request(
-        "https://backboard.railway.com/graphql/v2",
-        data=payload,
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {RAILWAY_TOKEN}",
-        },
-        method="POST"
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        result = json.loads(resp.read())
-        if "errors" in result:
-            logger.error(f"[Railway API] Erreurs : {result['errors']}")
-        else:
-            logger.debug(f"[Railway API] Variable {name} mise a jour")
+            logger.error(f"[save_trades] JSONBin erreur : {e}")
 
 
 def add_trade(product_id, symbol, amount_eur, entry_price, quantity, order_id,

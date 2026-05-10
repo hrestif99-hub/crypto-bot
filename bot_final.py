@@ -1109,27 +1109,18 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    import os
-    from trader import _railway_available, _fetch_railway_variable, RAILWAY_TOKEN, RAILWAY_PROJECT, RAILWAY_ENV, RAILWAY_SERVICE
-
+    from trader import _jsonbin_available, load_trades, JSONBIN_ID, JSONBIN_KEY
+    jsonbin_ok = _jsonbin_available()
+    trades     = get_active_trades()
     msg = (
-        f"DEBUG VARIABLES\n\n"
-        f"RAILWAY_API_KEY : {'OK (' + RAILWAY_TOKEN[-4:] + ')' if RAILWAY_TOKEN else 'VIDE'}\n"
-        f"RAILWAY_PROJECT : {'OK' if RAILWAY_PROJECT else 'VIDE'} {RAILWAY_PROJECT[:8] if RAILWAY_PROJECT else ''}\n"
-        f"RAILWAY_ENV : {'OK' if RAILWAY_ENV else 'VIDE'} {RAILWAY_ENV[:8] if RAILWAY_ENV else ''}\n"
-        f"RAILWAY_SERVICE : {'OK' if RAILWAY_SERVICE else 'VIDE'} {RAILWAY_SERVICE[:8] if RAILWAY_SERVICE else ''}\n\n"
-        f"Railway API dispo : {'OUI' if _railway_available() else 'NON'}\n"
+        f"DEBUG JSONBIN\n\n"
+        f"JSONBIN_BIN_ID : {'OK ' + JSONBIN_ID[:8] if JSONBIN_ID else 'VIDE'}\n"
+        f"JSONBIN_KEY    : {'OK' if JSONBIN_KEY else 'VIDE'}\n"
+        f"JSONBin dispo  : {'OUI' if jsonbin_ok else 'NON'}\n\n"
+        f"Trades actifs  : {len(trades)}\n"
     )
-
-    if _railway_available():
-        raw = _fetch_railway_variable("TRADES_DATA")
-        msg += f"TRADES_DATA lu : {'OUI' if raw else 'NON'} ({len(raw) if raw else 0} chars)\n"
-
-    trades = get_active_trades()
-    msg += f"\nTrades actifs : {len(trades)}\n"
     for key, t in trades.items():
         msg += f"- {t['symbol']} : {t['amount_eur']}EUR\n"
-
     await update.message.reply_text(msg)
 
 
