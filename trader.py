@@ -11,7 +11,7 @@ TRADES_FILE = "trades.json"
 
 # ─── Variables Railway pour persistance ──────────────────────
 # Railway API pour lire/ecrire les variables d'environnement
-RAILWAY_TOKEN   = os.environ.get("RAILWAY_TOKEN", "")
+RAILWAY_TOKEN   = os.environ.get("RAILWAY_API_KEY", "")
 RAILWAY_PROJECT = os.environ.get("RAILWAY_PROJECT_ID", "")
 RAILWAY_ENV     = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
 RAILWAY_SERVICE = os.environ.get("RAILWAY_SERVICE_ID", "")

@@ -1114,7 +1114,7 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         f"DEBUG VARIABLES\n\n"
-        f"RAILWAY_TOKEN : {'OK (' + RAILWAY_TOKEN[-4:] + ')' if RAILWAY_TOKEN else 'VIDE'}\n"
+        f"RAILWAY_API_KEY : {'OK (' + RAILWAY_TOKEN[-4:] + ')' if RAILWAY_TOKEN else 'VIDE'}\n"
         f"RAILWAY_PROJECT : {'OK' if RAILWAY_PROJECT else 'VIDE'} {RAILWAY_PROJECT[:8] if RAILWAY_PROJECT else ''}\n"
         f"RAILWAY_ENV : {'OK' if RAILWAY_ENV else 'VIDE'} {RAILWAY_ENV[:8] if RAILWAY_ENV else ''}\n"
         f"RAILWAY_SERVICE : {'OK' if RAILWAY_SERVICE else 'VIDE'} {RAILWAY_SERVICE[:8] if RAILWAY_SERVICE else ''}\n\n"
