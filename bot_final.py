@@ -12,7 +12,8 @@ from signals import analyze_signals
 from coinbase import (
     get_available_products, get_product_price, get_eur_balance,
     place_market_buy, place_market_sell, get_portfolio,
-    place_market_buy_usdc, place_market_sell_usdc
+    place_market_buy_usdc, place_market_sell_usdc,
+    get_usdc_balance, get_portfolio_with_history
 )
 from trader import (
     add_trade, update_trade_peak, should_sell, close_trade,
@@ -21,12 +22,6 @@ from trader import (
 )
 
 # ─── Configuration ───────────────────────────────────────────
-print("=== DEBUG ENV VARS ===")
-for k, v in sorted(os.environ.items()):
-    masked = v[:4] + "***" if len(v) > 4 else "***"
-    print(f"  {k} = {masked}")
-print("=== END ENV VARS ===")
-
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 if not CHAT_ID:
@@ -554,7 +549,78 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             + warning
         )
 
-    # ── Vente manuelle ────────────────────────────────────────
+    # ── Vente depuis portefeuille Coinbase ────────────────────
+    elif data.startswith("sell_coin_"):
+        symbol   = data[len("sell_coin_"):]
+        coin_data = ctx.user_data.get(f"sell_{symbol}")
+        if not coin_data:
+            await query.edit_message_text("Session expiree. Retape #vendre.")
+            return
+
+        ctx.user_data["pending_sell_coin"] = symbol
+        val = coin_data["val_eur"]
+        await query.edit_message_text(
+            f"Combien veux-tu vendre ?\n\n"
+            f"Crypto   : {symbol}\n"
+            f"Balance  : {coin_data['balance']:.6f} {symbol}\n"
+            f"Valeur   : ~{val:.2f} EUR\n\n"
+            f"Reponds avec un montant en euros (max {val:.2f} EUR)"
+        )
+
+    elif data.startswith("sell_confirm_coin_"):
+        suffix    = data[len("sell_confirm_coin_"):]
+        last_sep  = suffix.rfind("_")
+        symbol    = suffix[:last_sep]
+        amount_eur = float(suffix[last_sep + 1:])
+
+        coin_data = ctx.user_data.get(f"sell_{symbol}")
+        if not coin_data:
+            await query.edit_message_text("Session expiree. Retape #vendre.")
+            return
+
+        product_id    = coin_data["product_id"]
+        balance       = coin_data["balance"]
+        current_price = coin_data["current_price"]
+
+        await query.edit_message_text(f"Vente de {amount_eur:.2f} EUR de {symbol} en cours...")
+
+        # Calculer la quantite a vendre
+        quantite = (amount_eur / current_price) if current_price else balance
+        quantite = min(quantite, balance)
+
+        is_usdc = product_id.endswith("-USDC")
+        if is_usdc:
+            success, eur_recupere, sell_price, order_id = await place_market_sell_usdc(
+                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, quantite
+            )
+            if not sell_price:
+                sell_price = current_price
+        else:
+            success, order_id, _ = await place_market_sell(
+                COINBASE_API_KEY, COINBASE_API_SECRET, product_id, quantite
+            )
+            sell_price = current_price
+
+        if success:
+            pnl_eur = (sell_price - (coin_data["val_eur"] / balance)) * quantite if balance else 0
+            await ctx.bot.send_message(
+                chat_id=CHAT_ID,
+                text=(
+                    f"VENTE EFFECTUEE\n\n"
+                    f"Crypto  : {symbol}\n"
+                    f"Vendu   : {quantite:.6f} {symbol}\n"
+                    f"Montant : ~{amount_eur:.2f} EUR\n"
+                    f"Prix    : {sell_price:,.4f} EUR\n"
+                    + (f"(USDC → EUR converti auto)" if is_usdc else "")
+                )
+            )
+        else:
+            await ctx.bot.send_message(
+                chat_id=CHAT_ID,
+                text=f"Erreur vente {symbol} : {order_id}"
+            )
+
+    # ── Vente manuelle (ancien système) ──────────────────────
     elif data.startswith("sell_select_"):
         # Extraire le trade_key en retirant uniquement le prefixe
         trade_key = data[len("sell_select_"):]
@@ -737,47 +803,85 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ── Déclencheur vente manuelle ────────────────────────────
     if text.lower() in ["#vendre", "#vente", "#sell"]:
-        trades = get_active_trades()
-        if not trades:
-            await update.message.reply_text("Aucun trade actif en ce moment.")
+        await update.message.reply_text("Recuperation de ton portefeuille...")
+        portfolio = await get_portfolio(COINBASE_API_KEY, COINBASE_API_SECRET)
+
+        # Filtrer EUR et USDC, garder seulement les cryptos
+        cryptos = {k: v for k, v in portfolio.items()
+                   if k not in ("EUR", "USDC") and v > 0}
+
+        if not cryptos:
+            await update.message.reply_text("Aucune crypto dans ton portefeuille Coinbase.")
             return
 
-        # Grouper par coin pour affichage clair
-        coins_trades = {}
-        for key, trade in trades.items():
-            symbol = trade["symbol"]
-            if symbol not in coins_trades:
-                coins_trades[symbol] = []
-            coins_trades[symbol].append((key, trade))
-
-        msg = "Quelle position veux-tu vendre ?\n\n"
+        msg     = "Quelle crypto veux-tu vendre ?\n\n"
         buttons = []
 
-        for symbol, entries in coins_trades.items():
-            product_id    = entries[0][1]["product_id"]
-            current_price = await get_product_price(product_id, COINBASE_API_KEY, COINBASE_API_SECRET)
+        for symbol, balance in cryptos.items():
+            # Chercher le prix actuel
+            price_eur  = await get_product_price(f"{symbol}-EUR", COINBASE_API_KEY, COINBASE_API_SECRET)
+            price_usdc = await get_product_price(f"{symbol}-USDC", COINBASE_API_KEY, COINBASE_API_SECRET)
 
-            for i, (key, trade) in enumerate(entries, 1):
-                entry_price  = trade["entry_price"]
-                investi      = trade["amount_eur"]
-                date         = trade.get("date", "?")
-                val_actuelle = (trade["quantity"] * current_price) if current_price else 0
+            if price_eur:
+                current_price = price_eur
+                product_id    = f"{symbol}-EUR"
+            elif price_usdc:
+                current_price = price_usdc
+                product_id    = f"{symbol}-USDC"
+            else:
+                current_price = 0
+                product_id    = f"{symbol}-EUR"
 
-                if current_price and entry_price:
-                    pct    = ((current_price - entry_price) / entry_price) * 100
-                    signe  = "+" if pct >= 0 else ""
-                    label  = f"{symbol} — Entree {i} — {signe}{pct:.1f}% — {investi:.0f} EUR"
-                else:
-                    label  = f"{symbol} — Entree {i} — prix indispo — {investi:.0f} EUR"
-
-                buttons.append([InlineKeyboardButton(label, callback_data=f"sell_select_{key}")])
+            val = balance * current_price if current_price else 0
+            label = f"{symbol} — {balance:.4f} — ~{val:.2f} EUR"
+            # Stocker product_id et balance dans le callback via user_data
+            ctx.user_data[f"sell_{symbol}"] = {
+                "symbol":      symbol,
+                "product_id":  product_id,
+                "balance":     balance,
+                "current_price": current_price,
+                "val_eur":     val,
+            }
+            buttons.append([InlineKeyboardButton(label, callback_data=f"sell_coin_{symbol}")])
 
         reply_markup = InlineKeyboardMarkup(buttons)
         await update.message.reply_text(msg, reply_markup=reply_markup)
         return
 
-    # ── Montant de vente apres selection ─────────────────────
-    if "pending_sell" in ctx.user_data:
+    # ── Montant vente depuis portefeuille Coinbase ────────────
+    if "pending_sell_coin" in ctx.user_data:
+        symbol    = ctx.user_data["pending_sell_coin"]
+        coin_data = ctx.user_data.get(f"sell_{symbol}")
+        try:
+            amount = float(text.replace(",", ".").replace("€", "").strip())
+            if not coin_data:
+                await update.message.reply_text("Session expiree. Retape #vendre.")
+                del ctx.user_data["pending_sell_coin"]
+                return
+            if amount <= 0:
+                await update.message.reply_text("Le montant doit etre positif.")
+                return
+            if amount > coin_data["val_eur"] * 1.05:
+                await update.message.reply_text(f"Maximum ~{coin_data['val_eur']:.2f} EUR.")
+                return
+
+            keyboard = [[
+                InlineKeyboardButton(f"Confirmer {amount:.2f} EUR", callback_data=f"sell_confirm_coin_{symbol}_{amount}"),
+                InlineKeyboardButton("Annuler", callback_data=f"sell_cancel_{symbol}")
+            ]]
+            await update.message.reply_text(
+                f"Confirmer la vente ?\n\n"
+                f"Crypto  : {symbol}\n"
+                f"Montant : {amount:.2f} EUR\n"
+                f"Prix    : {coin_data['current_price']:,.4f} EUR",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            del ctx.user_data["pending_sell_coin"]
+        except ValueError:
+            await update.message.reply_text("Envoie juste un nombre, ex: 5")
+        return
+
+
         trade_key = ctx.user_data["pending_sell"]
         try:
             amount = float(text.replace(",", ".").replace("€", "").strip())
@@ -913,97 +1017,78 @@ async def cmd_portefeuille(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def cmd_recap(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Calcul en cours...")
+    await update.message.reply_text("Recuperation de ton portefeuille Coinbase...")
 
-    active_trades = get_active_trades()
-    summary       = get_trade_summary()
+    portfolio_history = await get_portfolio_with_history(COINBASE_API_KEY, COINBASE_API_SECRET)
+    eur_balance       = await get_eur_balance(COINBASE_API_KEY, COINBASE_API_SECRET)
+    usdc_balance_val  = await get_usdc_balance(COINBASE_API_KEY, COINBASE_API_SECRET)
 
-    msg  = "RECAP COMPLET\n"
+    msg  = f"PORTEFEUILLE COINBASE\n"
     msg += f"{datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
     msg += "─────────────────\n\n"
+    msg += f"EUR  disponible : {eur_balance:.2f} EUR\n"
+    if usdc_balance_val > 0:
+        msg += f"USDC disponible : {usdc_balance_val:.2f} USDC\n"
+    msg += "\n"
 
-    if active_trades:
-        msg += "TRADES ACTIFS\n\n"
+    total_investi  = 0
+    total_actuel   = 0
 
-        # ── Grouper les trades par coin ───────────────────────
-        coins_trades = {}
-        for key, trade in active_trades.items():
-            symbol = trade["symbol"]
-            if symbol not in coins_trades:
-                coins_trades[symbol] = []
-            coins_trades[symbol].append((key, trade))
+    for symbol, data in portfolio_history.items():
+        balance   = data["balance"]
+        avg_price = data["avg_price"]
+        product_id = data["product_id"]
 
-        for symbol, entries in coins_trades.items():
-            # Recupere le prix actuel une seule fois par coin
-            product_id    = entries[0][1]["product_id"]
-            current_price = await get_product_price(
-                product_id, COINBASE_API_KEY, COINBASE_API_SECRET
-            )
-            profil = "UV" if entries[0][1].get("is_ultra_volatile") else "STD"
-            nb     = len(entries)
+        # Prix actuel
+        current_price = await get_product_price(product_id, COINBASE_API_KEY, COINBASE_API_SECRET)
+        if not current_price:
+            # Essayer l'autre paire
+            alt = product_id.replace("-USDC", "-EUR") if "-USDC" in product_id else product_id.replace("-EUR", "-USDC")
+            current_price = await get_product_price(alt, COINBASE_API_KEY, COINBASE_API_SECRET)
 
-            msg += f"{'─' * 20}\n"
-            msg += f"{symbol} [{profil}] — {nb} entree{'s' if nb > 1 else ''}\n\n"
+        val_actuelle = balance * current_price if current_price else 0
+        investi      = data["total_invested_eur"]
 
-            total_investi  = 0
-            total_pnl_eur  = 0
-            total_quantite = 0
+        if avg_price and current_price:
+            pct  = ((current_price - avg_price) / avg_price) * 100
+            pnl  = val_actuelle - investi
+            signe = "+" if pnl >= 0 else ""
+            statut = "GAIN" if pct >= 0 else "PERTE"
+        else:
+            pct = pnl = 0
+            signe = ""
+            statut = "?"
 
-            for i, (key, trade) in enumerate(entries, 1):
-                entry_price = trade["entry_price"]
-                quantite    = trade["quantity"]
-                investi     = trade["amount_eur"]
-                date        = trade.get("date", "?")
-                peak_pct    = trade.get("peak_pct", 0)
+        msg += f"{'─' * 20}\n"
+        msg += f"{symbol} — {statut}\n"
+        msg += f"Quantite   : {balance:.6f}\n"
+        if current_price:
+            msg += f"Prix actuel : {current_price:,.4f} EUR\n"
+        if avg_price:
+            msg += f"Prix moyen  : {avg_price:,.4f} EUR\n"
+        if investi:
+            msg += f"Investi     : {investi:.2f} EUR\n"
+        if val_actuelle:
+            msg += f"Valeur      : {val_actuelle:.2f} EUR\n"
+        if pnl:
+            msg += f"P&L         : {signe}{pnl:.2f} EUR ({signe}{pct:.1f}%)\n"
+        msg += f"Dernier achat : {data['last_buy_date']}\n\n"
 
-                if current_price and entry_price:
-                    pct = ((current_price - entry_price) / entry_price) * 100
-                    pnl = (current_price - entry_price) * quantite
-                    statut = "GAIN" if pct >= 0 else "PERTE"
-                    signe  = "+" if pnl >= 0 else ""
-                    msg += (
-                        f"Entree {i} — {date}\n"
-                        f"  Investi : {investi:.2f} EUR a {entry_price:,.4f} EUR\n"
-                        f"  Actuel  : {current_price:,.4f} EUR\n"
-                        f"  P&L     : {signe}{pnl:.2f} EUR ({signe}{pct:.1f}%) — {statut}\n"
-                        f"  Pic     : +{peak_pct:.1f}%\n\n"
-                    )
-                    total_pnl_eur  += pnl
-                else:
-                    msg += (
-                        f"Entree {i} — {date}\n"
-                        f"  Investi : {investi:.2f} EUR a {entry_price:,.4f} EUR\n"
-                        f"  Prix actuel indisponible\n\n"
-                    )
+        total_investi += investi
+        total_actuel  += val_actuelle
+        await asyncio.sleep(0.2)
 
-                total_investi  += investi
-                total_quantite += quantite
+    if total_investi > 0:
+        total_pnl = total_actuel - total_investi
+        total_pct = (total_pnl / total_investi) * 100
+        signe     = "+" if total_pnl >= 0 else ""
+        msg += "─────────────────\n"
+        msg += f"TOTAL INVESTI  : {total_investi:.2f} EUR\n"
+        msg += f"VALEUR ACTUELLE: {total_actuel:.2f} EUR\n"
+        msg += f"P&L TOTAL      : {signe}{total_pnl:.2f} EUR ({signe}{total_pct:.1f}%)\n"
 
-            # Total du coin
-            if current_price and total_investi:
-                total_pct  = (total_pnl_eur / total_investi) * 100
-                signe      = "+" if total_pnl_eur >= 0 else ""
-                val_actuelle = total_quantite * current_price
-                msg += (
-                    f"TOTAL {symbol} : {total_investi:.2f} EUR investi\n"
-                    f"Valeur actuelle : {val_actuelle:.2f} EUR\n"
-                    f"P&L total : {signe}{total_pnl_eur:.2f} EUR ({signe}{total_pct:.1f}%)\n"
-                    f"Stop : {entries[0][1]['stop_loss_pct']}%  "
-                    f"Trailing : -{entries[0][1]['trailing_stop_pct']}%\n\n"
-                )
-
-            await asyncio.sleep(0.3)
-
-    msg += "─────────────────\n"
-    msg += "BILAN GLOBAL\n"
-    msg += f"Trades actifs  : {summary['active_count']}\n"
-    msg += f"Trades clos    : {summary['closed_count']}\n"
-    msg += f"P&L total clos : {summary['total_pnl_closed']:+.2f} EUR\n"
-    if summary['closed_count'] > 0:
-        msg += f"Win rate       : {summary['winrate']:.0f}% ({summary['wins']}W / {summary['losses']}L)\n\n"
-        msg += "Par profil :\n"
-        msg += f"STANDARD       : {summary['standard_count']} trades | P&L {summary['standard_pnl']:+.2f} EUR\n"
-        msg += f"ULTRA VOLATILE : {summary['ultra_count']} trades | P&L {summary['ultra_pnl']:+.2f} EUR\n"
+    if not portfolio_history:
+        msg += "Aucune crypto detectee dans ton portefeuille."
 
     await update.message.reply_text(msg)
 

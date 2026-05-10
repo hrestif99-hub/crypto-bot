@@ -209,9 +209,104 @@ async def place_market_sell(api_key, api_secret, product_id, quantity):
         return False, str(e), {}
 
 
-async def get_eur_balance(api_key, api_secret):
+async def get_order_history(api_key, api_secret, limit=100):
+    """
+    Recupere l'historique des ordres FILLED (executes) depuis Coinbase.
+    Retourne une liste d'ordres avec symbol, side, prix, quantite, date.
+    """
+    path = "/api/v3/brokerage/orders/historical/batch"
+    params = f"?order_status=FILLED&limit={limit}&sort_by=LAST_FILL_TIME&order_side=BUY"
+    headers = get_headers(api_key, api_secret, "GET", path)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                COINBASE_API_URL + path + params,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as r:
+                raw = await r.read()
+                data = _parse_json(raw, f"get_order_history HTTP {r.status}")
+                if data is None:
+                    return []
+                orders = data.get("orders", [])
+                result = []
+                for o in orders:
+                    product_id = o.get("product_id", "")
+                    symbol = product_id.replace("-EUR", "").replace("-USDC", "")
+                    filled_size  = float(o.get("filled_size", 0) or 0)
+                    filled_value = float(o.get("filled_value", 0) or 0)
+                    avg_price    = filled_value / filled_size if filled_size > 0 else 0
+                    result.append({
+                        "product_id":  product_id,
+                        "symbol":      symbol,
+                        "side":        o.get("side", ""),
+                        "quantity":    filled_size,
+                        "total_eur":   filled_value,
+                        "avg_price":   avg_price,
+                        "date":        o.get("last_fill_time", "")[:16].replace("T", " "),
+                        "order_id":    o.get("order_id", ""),
+                    })
+                return result
+    except Exception as e:
+        logger.error(f"[get_order_history] Erreur : {e}")
+        return []
+
+
+async def get_portfolio_with_history(api_key, api_secret):
+    """
+    Retourne le portefeuille complet avec pour chaque crypto :
+    - balance actuelle
+    - prix moyen d'achat (depuis l'historique des ordres)
+    - montant total investi
+    - paire de trading (EUR ou USDC)
+    """
     portfolio = await get_portfolio(api_key, api_secret)
-    return portfolio.get("EUR", 0.0)
+    orders    = await get_order_history(api_key, api_secret)
+
+    # Grouper les ordres par symbol pour calculer le prix moyen d'achat
+    buy_history = {}
+    for o in orders:
+        sym = o["symbol"]
+        if sym not in buy_history:
+            buy_history[sym] = {"total_qty": 0, "total_eur": 0, "orders": []}
+        buy_history[sym]["total_qty"] += o["quantity"]
+        buy_history[sym]["total_eur"] += o["total_eur"]
+        buy_history[sym]["orders"].append(o)
+
+    result = {}
+    for currency, balance in portfolio.items():
+        if currency in ("EUR", "USDC") or balance <= 0:
+            continue
+
+        history = buy_history.get(currency, {})
+        total_qty = history.get("total_qty", 0)
+        total_eur = history.get("total_eur", 0)
+        avg_price = total_eur / total_qty if total_qty > 0 else 0
+        orders_list = history.get("orders", [])
+
+        # Determiner la paire de trading
+        pair_eur  = f"{currency}-EUR"
+        pair_usdc = f"{currency}-USDC"
+        # Regarder l'historique pour savoir quelle paire a ete utilisee
+        product_ids = [o["product_id"] for o in orders_list]
+        if pair_usdc in product_ids:
+            product_id = pair_usdc
+        else:
+            product_id = pair_eur
+
+        result[currency] = {
+            "symbol":     currency,
+            "product_id": product_id,
+            "balance":    balance,
+            "avg_price":  avg_price,
+            "total_invested_eur": total_eur,
+            "last_buy_date": orders_list[0]["date"] if orders_list else "?",
+            "nb_achats":  len(orders_list),
+            "orders":     orders_list,
+        }
+
+    return result
+
 
 
 async def get_usdc_balance(api_key, api_secret):
