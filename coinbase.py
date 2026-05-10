@@ -172,26 +172,31 @@ async def place_market_buy(api_key, api_secret, product_id, amount_eur):
         return False, str(e), {}
 
 
-def _round_quantity(qty: float) -> float:
-    """Arrondit une quantite au nombre de decimales accepte par Coinbase (max 8)."""
+def _format_quantity(qty: float) -> str:
+    """
+    Formate une quantite en string avec precision fixe pour Coinbase.
+    str(round(x, 8)) peut produire plus de 8 decimales a cause du float.
+    f"{x:.Nf}" garantit exactement N decimales.
+    """
+    qty = float(qty)
     if qty > 1:
-        return round(qty, 4)
+        return f"{qty:.4f}"
     elif qty > 0.01:
-        return round(qty, 6)
+        return f"{qty:.6f}"
     else:
-        return round(qty, 8)
+        return f"{qty:.8f}"
 
 
 async def place_market_sell(api_key, api_secret, product_id, quantity):
     path = "/api/v3/brokerage/orders"
-    quantity = _round_quantity(float(quantity))
+    qty_str = _format_quantity(quantity)
     order = {
         "client_order_id": f"bot_sell_{int(time.time())}",
         "product_id": product_id,
         "side": "SELL",
         "order_configuration": {
             "market_market_ioc": {
-                "base_size": str(quantity)
+                "base_size": qty_str
             }
         }
     }
