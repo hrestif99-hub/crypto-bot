@@ -757,6 +757,17 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         is_usdc_pair = product_id.endswith("-USDC")
 
+        if is_usdc_pair and amount < 5.0:
+            await ctx.bot.send_message(
+                chat_id=CHAT_ID,
+                text=(
+                    f"Montant minimum 5€ pour les paires USDC.\n\n"
+                    f"{symbol} est coté en USDC — la conversion EUR→USDC\n"
+                    f"nécessite au moins 5€ (limite Coinbase)."
+                )
+            )
+            return
+
         if is_usdc_pair:
             # Achat via USDC : conversion EUR→USDC puis achat
             success, quantity, current_price, order_id = await place_market_buy_usdc(

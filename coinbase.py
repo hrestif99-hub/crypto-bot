@@ -381,6 +381,9 @@ async def place_market_buy_usdc(api_key, api_secret, product_id_usdc, amount_eur
 
     Retourne (success, quantity, entry_price_usdc, message)
     """
+    if amount_eur < 5.0:
+        return False, 0, 0, "Montant minimum 5 EUR requis pour les paires USDC"
+
     # 1. Recuperer le prix USDC-EUR pour estimer le montant USDC
     usdc_eur_price = await get_product_price("USDC-EUR", api_key, api_secret)
     if not usdc_eur_price:
