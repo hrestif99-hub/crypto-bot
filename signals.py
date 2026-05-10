@@ -278,8 +278,12 @@ async def analyze_signals(product_id, api_key, api_secret, volume_24h=0):
         nb_criteres_uv = sum([critere_atr, critere_obv, critere_squeeze])
 
         # Etape 3 : classification finale
-        # Pour etre ULTRA VOLATILE, il faut etre candidat ET avoir >= 2/3 criteres UV
-        is_ultra_volatile = candidat_uv and (nb_criteres_uv >= 2)
+        # Pour etre ULTRA VOLATILE :
+        # - ATR > 6% OBLIGATOIRE (le coin doit vraiment bouger fort)
+        # - + au moins 1 autre critere parmi OBV ou Squeeze
+        # Cela evite de classer de gros altcoins stables (UNI, LINK...) comme UV
+        # meme si leur OBV et Squeeze sont actifs
+        is_ultra_volatile = critere_atr and (critere_obv or critere_squeeze)
 
         # ── Scoring ───────────────────────────────────────────
         score   = 0
