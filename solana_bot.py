@@ -413,6 +413,57 @@ async def _jup_swap(session: aiohttp.ClientSession, payload: dict) -> dict | Non
         return None
 
 
+# ─── Pump.fun fallback buy ────────────────────────────────────
+async def pump_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: float) -> tuple[bool, str, int]:
+    """Achète via PumpPortal quand Jupiter n'a pas de route. Retourne (success, sig, qty_raw)."""
+    if DRY_RUN:
+        logger.info(f"[DRY RUN] Pump.fun achat simulé : {amount_usdc} USDC de {mint[:8]}")
+        return True, "dry_run_sig", 1000000
+    kp = get_keypair()
+    if not kp:
+        return False, "keypair manquant", 0
+    try:
+        async with session.post(
+            "https://pumpportal.fun/api/trade",
+            json={
+                "action":            "buy",
+                "mint":              mint,
+                "amount":            amount_usdc,
+                "denominatedInSol":  "false",
+                "slippage":          15,
+                "priorityFee":       0.005,
+                "pool":              "pump",
+            },
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as r:
+            body = await r.text()
+            if r.status != 200:
+                logger.error(f"pump_buy: HTTP {r.status} — {body[:400]}")
+                return False, f"pump HTTP {r.status}", 0
+            data = json.loads(body)
+            if "transaction" not in data:
+                logger.error(f"pump_buy: pas de transaction dans la réponse — {body[:400]}")
+                return False, "pump: transaction absente", 0
+        from solders.transaction import VersionedTransaction
+        from solana.rpc.async_api import AsyncClient
+        raw    = base64.b64decode(data["transaction"])
+        tx     = VersionedTransaction.from_bytes(raw)
+        signed = VersionedTransaction(tx.message, [kp])
+        async with AsyncClient(HELIUS_RPC_URL) as client:
+            result = await asyncio.wait_for(
+                client.send_raw_transaction(bytes(signed)), timeout=30
+            )
+        sig = str(result.value)
+        logger.info(f"pump_buy {mint[:8]} sig={sig[:12]}")
+        return True, sig, 1000000  # qty_raw inconnu depuis pumpportal
+    except asyncio.TimeoutError:
+        logger.error(f"pump_buy: timeout ({mint[:8]})")
+        return False, "timeout", 0
+    except Exception as e:
+        logger.error(f"pump_buy: {e}")
+        return False, str(e), 0
+
+
 # ─── Jupiter buy/sell ─────────────────────────────────────────
 async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: float) -> tuple[bool, str, int]:
     """Achète via USDC. Retourne (success, sig, quantity_raw)."""
@@ -433,6 +484,9 @@ async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: fl
     if not quote:
         return False, "quote échoué (voir logs)", 0
     if "error" in quote:
+        if "NO_ROUTES_FOUND" in str(quote.get("error", "")):
+            logger.warning(f"jupiter_buy: NO_ROUTES_FOUND pour {mint[:8]}, fallback pump.fun")
+            return await pump_buy(session, mint, amount_usdc)
         logger.error(f"jupiter_buy: erreur Jupiter quote: {quote['error']}")
         return False, f"quote error: {quote['error']}", 0
     swap = await _jup_swap(session, {
