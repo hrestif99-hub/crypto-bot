@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 # ─── Configuration ────────────────────────────────────────────
@@ -144,20 +144,32 @@ async def get_usdc_balance() -> float:
     if not kp:
         return 0.0
     try:
-        from solana.rpc.async_api import AsyncClient
-        from solders.pubkey import Pubkey
-        async with AsyncClient(HELIUS_RPC_URL) as client:
-            resp = await asyncio.wait_for(
-                client.get_token_accounts_by_owner_json_parsed(
-                    kp.pubkey(), {"mint": Pubkey.from_string(USDC_MINT)}
-                ),
-                timeout=30,
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                str(kp.pubkey()),
+                {"mint": USDC_MINT},
+                {"encoding": "jsonParsed"},
+            ],
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                HELIUS_RPC_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)
+            ) as r:
+                data = await r.json(content_type=None)
+        total = 0.0
+        for acct in (data.get("result", {}).get("value") or []):
+            info = (
+                acct.get("account", {})
+                    .get("data", {})
+                    .get("parsed", {})
+                    .get("info", {})
+                    .get("tokenAmount", {})
             )
-            total = 0.0
-            for acct in (resp.value or []):
-                info = acct.account.data.parsed["info"]["tokenAmount"]
-                total += float(info.get("uiAmount") or 0)
-            return total
+            total += float(info.get("uiAmount") or 0)
+        return total
     except asyncio.TimeoutError:
         logger.error("get_usdc_balance: timeout RPC Solana")
         return 0.0
@@ -196,7 +208,7 @@ async def fetch_pumpfun_new(session: aiohttp.ClientSession) -> list[dict]:
     data = await fetch_json(session, url)
     if not data:
         return []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     result = []
     for item in (data if isinstance(data, list) else []):
         mint = item.get("mint")
@@ -204,7 +216,7 @@ async def fetch_pumpfun_new(session: aiohttp.ClientSession) -> list[dict]:
             continue
         ts = item.get("created_timestamp", 0)
         if ts:
-            created = datetime.utcfromtimestamp(ts / 1000 if ts > 1e10 else ts)
+            created = datetime.fromtimestamp(ts / 1000 if ts > 1e10 else ts, timezone.utc).replace(tzinfo=None)
             age_min = (now - created).total_seconds() / 60
         else:
             age_min = 999.0
@@ -281,7 +293,7 @@ def compute_score(pair, pumpfun: dict | None, gp, tg_bonus: bool) -> tuple[int, 
     if pair and age_min == 999:
         cat = pair.get("pairCreatedAt", 0)
         if cat:
-            age_min = (datetime.utcnow() - datetime.utcfromtimestamp(cat / 1000)).total_seconds() / 60
+            age_min = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.fromtimestamp(cat / 1000, timezone.utc).replace(tzinfo=None)).total_seconds() / 60
     if age_min < 2:    score += 15; parts.append(f"Age {age_min:.1f}min(+15)")
     elif age_min < 5:  score += 10; parts.append(f"Age {age_min:.1f}min(+10)")
     elif age_min < 10: score += 5;  parts.append(f"Age {age_min:.1f}min(+5)")
@@ -419,7 +431,7 @@ def open_pos(mint: str, symbol: str, amount_usdc: float, entry_price: float,
         "score":         score,
         "reasons":       reasons,
         "sig":           sig,
-        "opened_at":     datetime.utcnow().isoformat(),
+        "opened_at":     datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
     _save_state()
 
@@ -523,7 +535,7 @@ async def check_pyramid(session: aiohttp.ClientSession, mint: str):
         return
     last = pos.get("last_pyramid")
     if last:
-        elapsed = (datetime.utcnow() - datetime.fromisoformat(last)).total_seconds()
+        elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.fromisoformat(last)).total_seconds()
         if elapsed < PYRAMID_COOL:
             return
     current = await get_token_price_usd(session, mint)
@@ -541,7 +553,7 @@ async def check_pyramid(session: aiohttp.ClientSession, mint: str):
         positions[mint]["qty_raw"]       += qty_raw
         positions[mint]["amount_usdc"]   += PYRAMID_USDC
         positions[mint]["pyramid_count"]  = n
-        positions[mint]["last_pyramid"]   = datetime.utcnow().isoformat()
+        positions[mint]["last_pyramid"]   = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         _save_state()
         await send_tg(
             f"SOLANA PYRAMIDING\n\n"
@@ -553,7 +565,7 @@ async def check_pyramid(session: aiohttp.ClientSession, mint: str):
 
 # ─── Signal Telegram ──────────────────────────────────────────
 def has_tg_signal(mint: str) -> bool:
-    cutoff   = datetime.utcnow() - timedelta(seconds=SIGNAL_WINDOW)
+    cutoff   = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=SIGNAL_WINDOW)
     channels = {ch for ch, ts_list in tg_mentions[mint].items()
                 if any(t > cutoff for t in ts_list)}
     return len(channels) >= SIGNAL_THRESHOLD
@@ -575,7 +587,7 @@ async def process_token(session: aiohttp.ClientSession, mint: str,
     if pair and age_min == 999:
         cat = pair.get("pairCreatedAt", 0)
         if cat:
-            age_min = (datetime.utcnow() - datetime.utcfromtimestamp(cat / 1000)).total_seconds() / 60
+            age_min = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.fromtimestamp(cat / 1000, timezone.utc).replace(tzinfo=None)).total_seconds() / 60
 
     if age_min > 10 or liq < 5_000 or (vol5 < 1_000 and not has_tg_signal(mint)):
         blacklist.add(mint)
@@ -731,7 +743,7 @@ async def telethon_loop():
                     channel = getattr(event.chat, "username", "unknown")
                     for addr in SOL_ADDR_RE.findall(text):
                         if 32 <= len(addr) <= 44:
-                            tg_mentions[addr][channel].append(datetime.utcnow())
+                            tg_mentions[addr][channel].append(datetime.now(timezone.utc).replace(tzinfo=None))
                             logger.debug(f"Signal TG {addr[:8]} @{channel}")
                 except Exception as e:
                     logger.error(f"on_msg handler: {e}")
