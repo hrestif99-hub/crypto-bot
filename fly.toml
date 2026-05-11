@@ -2,10 +2,6 @@ app = "crypto-agent-8sc1qg"
 primary_region = "cdg"
 
 [build]
-  builder = "paketobuildpacks/builder:base"
 
 [processes]
   app = "python solana_bot.py"
-
-[deploy]
-  release_command = ""
