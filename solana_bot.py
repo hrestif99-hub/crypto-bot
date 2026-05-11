@@ -347,27 +347,67 @@ def compute_score(pair, pumpfun: dict | None, gp, tg_bonus: bool) -> tuple[int, 
     return score, " | ".join(parts)
 
 
+# ─── Jupiter : quote avec log complet en cas d'erreur ─────────
+async def _jup_quote(session: aiohttp.ClientSession, url: str) -> dict | None:
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            body = await r.text()
+            if r.status == 200:
+                return json.loads(body)
+            logger.error(
+                f"Jupiter quote HTTP {r.status}\n"
+                f"  URL  : {url}\n"
+                f"  Body : {body[:800]}"
+            )
+            return None
+    except Exception as e:
+        logger.error(f"Jupiter quote exception: {e} | URL: {url[:120]}")
+        return None
+
+
+async def _jup_swap(session: aiohttp.ClientSession, payload: dict) -> dict | None:
+    url = "https://quote-api.jup.ag/v6/swap"
+    try:
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            body = await r.text()
+            if r.status == 200:
+                return json.loads(body)
+            logger.error(
+                f"Jupiter swap HTTP {r.status}\n"
+                f"  Body : {body[:800]}"
+            )
+            return None
+    except Exception as e:
+        logger.error(f"Jupiter swap exception: {e}")
+        return None
+
+
 # ─── Jupiter buy/sell ─────────────────────────────────────────
 async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: float) -> tuple[bool, str, int]:
     """Achète via USDC. Retourne (success, sig, quantity_raw)."""
     kp = get_keypair()
     if not kp:
         return False, "keypair manquant", 0
-    amount_raw = int(amount_usdc * 10**USDC_DECIMALS)
+    amount_raw = int(amount_usdc * 10**USDC_DECIMALS)  # 2.0 USDC → 2_000_000
     quote_url = (
         f"https://quote-api.jup.ag/v6/quote"
         f"?inputMint={USDC_MINT}&outputMint={mint}"
         f"&amount={amount_raw}&slippageBps={SLIPPAGE_BPS}"
     )
-    quote = await fetch_json(session, quote_url)
-    if not quote or "error" in quote:
-        return False, f"quote échoué: {quote}", 0
-    swap = await post_json(session, "https://quote-api.jup.ag/v6/swap", {
+    logger.info(f"jupiter_buy: quote {mint[:8]}… amount_raw={amount_raw} ({amount_usdc} USDC) slippage={SLIPPAGE_BPS}bps")
+    quote = await _jup_quote(session, quote_url)
+    if not quote:
+        return False, "quote échoué (voir logs)", 0
+    if "error" in quote:
+        logger.error(f"jupiter_buy: erreur Jupiter quote: {quote['error']}")
+        return False, f"quote error: {quote['error']}", 0
+    swap = await _jup_swap(session, {
         "quoteResponse":    quote,
         "userPublicKey":    str(kp.pubkey()),
         "wrapAndUnwrapSol": True,
     })
     if not swap or "swapTransaction" not in swap:
+        logger.error(f"jupiter_buy: swapTransaction absent — réponse: {swap}")
         return False, "swap échoué", 0
     try:
         from solders.transaction import VersionedTransaction
@@ -401,15 +441,20 @@ async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) 
         f"?inputMint={mint}&outputMint={USDC_MINT}"
         f"&amount={qty_raw}&slippageBps={SLIPPAGE_BPS}"
     )
-    quote = await fetch_json(session, quote_url)
-    if not quote or "error" in quote:
-        return False, f"quote vente échoué: {quote}", 0.0
-    swap = await post_json(session, "https://quote-api.jup.ag/v6/swap", {
+    logger.info(f"jupiter_sell: quote {mint[:8]}… qty_raw={qty_raw} slippage={SLIPPAGE_BPS}bps")
+    quote = await _jup_quote(session, quote_url)
+    if not quote:
+        return False, "quote vente échoué (voir logs)", 0.0
+    if "error" in quote:
+        logger.error(f"jupiter_sell: erreur Jupiter quote: {quote['error']}")
+        return False, f"quote error: {quote['error']}", 0.0
+    swap = await _jup_swap(session, {
         "quoteResponse":    quote,
         "userPublicKey":    str(kp.pubkey()),
         "wrapAndUnwrapSol": True,
     })
     if not swap or "swapTransaction" not in swap:
+        logger.error(f"jupiter_sell: swapTransaction absent — réponse: {swap}")
         return False, "swap vente échoué", 0.0
     try:
         from solders.transaction import VersionedTransaction
