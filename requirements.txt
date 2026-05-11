@@ -8,3 +8,4 @@ solana
 solders
 telethon
 base58
+dnspython

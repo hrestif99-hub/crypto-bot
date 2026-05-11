@@ -8,8 +8,25 @@ import json
 import logging
 import re
 import base64
+import socket
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+
+# ─── Patch DNS (Railway / environnements sans résolution DNS système) ─────────
+_orig_getaddrinfo = socket.getaddrinfo
+def _patched_getaddrinfo(host, port, *args, **kwargs):
+    try:
+        return _orig_getaddrinfo(host, port, *args, **kwargs)
+    except socket.gaierror:
+        try:
+            import dns.resolver
+            r = dns.resolver.Resolver()
+            r.nameservers = ["8.8.8.8", "1.1.1.1"]
+            ip = str(r.resolve(host)[0])
+            return _orig_getaddrinfo(ip, port, *args, **kwargs)
+        except Exception:
+            raise
+socket.getaddrinfo = _patched_getaddrinfo
 
 # ─── Configuration ────────────────────────────────────────────
 SOLANA_PRIVATE_KEY  = os.environ.get("SOLANA_PRIVATE_KEY", "")
@@ -349,20 +366,26 @@ def compute_score(pair, pumpfun: dict | None, gp, tg_bonus: bool) -> tuple[int, 
 
 # ─── Jupiter : quote avec log complet en cas d'erreur ─────────
 async def _jup_quote(session: aiohttp.ClientSession, url: str) -> dict | None:
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-            body = await r.text()
-            if r.status == 200:
-                return json.loads(body)
-            logger.error(
-                f"Jupiter quote HTTP {r.status}\n"
-                f"  URL  : {url}\n"
-                f"  Body : {body[:800]}"
-            )
-            return None
-    except Exception as e:
-        logger.error(f"Jupiter quote exception: {e} | URL: {url[:120]}")
-        return None
+    for attempt in range(1, 4):
+        try:
+            logger.info(f"Jupiter quote tentative {attempt}/3…")
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                body = await r.text()
+                if r.status == 200:
+                    return json.loads(body)
+                # Erreur HTTP applicative → pas de retry (400 = mint invalide, etc.)
+                logger.error(
+                    f"Jupiter quote HTTP {r.status}\n"
+                    f"  URL  : {url}\n"
+                    f"  Body : {body[:800]}"
+                )
+                return None
+        except Exception as e:
+            logger.error(f"Jupiter quote tentative {attempt}/3 échouée: {e}")
+            if attempt < 3:
+                await asyncio.sleep(1)
+    logger.error("Jupiter inaccessible après 3 tentatives")
+    return None
 
 
 async def _jup_swap(session: aiohttp.ClientSession, payload: dict) -> dict | None:
@@ -859,6 +882,32 @@ async def auth_telethon():
     await client.disconnect()
 
 
+# ─── Test de connectivité Jupiter au démarrage ────────────────
+async def _check_jupiter_connectivity():
+    # SOL → USDC, 0.001 SOL — juste pour vérifier que l'hôte répond
+    url = (
+        "https://quote-api.jup.ag/v6/quote"
+        "?inputMint=So11111111111111111111111111111111111111112"
+        "&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        "&amount=1000000&slippageBps=50"
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status in (200, 400):
+                    logger.info(f"Jupiter API accessible (HTTP {r.status}) ✓")
+                    return True
+                body = await r.text()
+                logger.warning(f"Jupiter API répond HTTP {r.status} : {body[:200]}")
+                return False
+    except Exception as e:
+        logger.error(
+            f"Jupiter API INACCESSIBLE : {e}\n"
+            f"  → Vérifier la résolution DNS de quote-api.jup.ag depuis Railway"
+        )
+        return False
+
+
 # ─── Main ─────────────────────────────────────────────────────
 async def main():
     _load_state()
@@ -868,6 +917,7 @@ async def main():
     else:
         logger.info(f"Wallet : {kp.pubkey()}")
 
+    await _check_jupiter_connectivity()
     await send_tg("SOLANA MEMECOIN BOT DÉMARRÉ\nScan DexScreener + Pump.fun actif")
 
     await asyncio.gather(
