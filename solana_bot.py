@@ -426,7 +426,7 @@ async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: fl
     quote_url = (
         f"{_JUP_BASE}/quote"
         f"?inputMint={USDC_MINT}&outputMint={mint}"
-        f"&amount={amount_raw}&slippageBps={SLIPPAGE_BPS}"
+        f"&amount={amount_raw}&slippageBps={SLIPPAGE_BPS}&maxAccounts=20"
     )
     logger.info(f"jupiter_buy: quote {mint[:8]}… amount_raw={amount_raw} ({amount_usdc} USDC) slippage={SLIPPAGE_BPS}bps")
     quote = await _jup_quote(session, quote_url)
@@ -436,9 +436,11 @@ async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: fl
         logger.error(f"jupiter_buy: erreur Jupiter quote: {quote['error']}")
         return False, f"quote error: {quote['error']}", 0
     swap = await _jup_swap(session, {
-        "quoteResponse":    quote,
-        "userPublicKey":    str(kp.pubkey()),
-        "wrapAndUnwrapSol": True,
+        "quoteResponse":              quote,
+        "userPublicKey":              str(kp.pubkey()),
+        "wrapAndUnwrapSol":           True,
+        "dynamicComputeUnitLimit":    True,
+        "prioritizationFeeLamports":  "auto",
     })
     if not swap or "swapTransaction" not in swap:
         logger.error(f"jupiter_buy: swapTransaction absent — réponse: {swap}")
@@ -477,7 +479,7 @@ async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) 
     quote_url = (
         f"{_JUP_BASE}/quote"
         f"?inputMint={mint}&outputMint={USDC_MINT}"
-        f"&amount={qty_raw}&slippageBps={SLIPPAGE_BPS}"
+        f"&amount={qty_raw}&slippageBps={SLIPPAGE_BPS}&maxAccounts=20"
     )
     logger.info(f"jupiter_sell: quote {mint[:8]}… qty_raw={qty_raw} slippage={SLIPPAGE_BPS}bps")
     quote = await _jup_quote(session, quote_url)
@@ -487,9 +489,11 @@ async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) 
         logger.error(f"jupiter_sell: erreur Jupiter quote: {quote['error']}")
         return False, f"quote error: {quote['error']}", 0.0
     swap = await _jup_swap(session, {
-        "quoteResponse":    quote,
-        "userPublicKey":    str(kp.pubkey()),
-        "wrapAndUnwrapSol": True,
+        "quoteResponse":              quote,
+        "userPublicKey":              str(kp.pubkey()),
+        "wrapAndUnwrapSol":           True,
+        "dynamicComputeUnitLimit":    True,
+        "prioritizationFeeLamports":  "auto",
     })
     if not swap or "swapTransaction" not in swap:
         logger.error(f"jupiter_sell: swapTransaction absent — réponse: {swap}")
