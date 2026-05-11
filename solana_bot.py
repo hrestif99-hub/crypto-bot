@@ -55,6 +55,7 @@ _JUP_ENDPOINTS = [
     "https://api.jup.ag/swap/v1",
 ]
 _JUP_BASE: str = _JUP_ENDPOINTS[0]  # mis à jour par _init_jupiter_endpoint()
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 STOP_LOSS_PCT   = -30.0
 TP_HALF_PCT     = 50.0      # vendre 50% à +50%
@@ -415,6 +416,9 @@ async def _jup_swap(session: aiohttp.ClientSession, payload: dict) -> dict | Non
 # ─── Jupiter buy/sell ─────────────────────────────────────────
 async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: float) -> tuple[bool, str, int]:
     """Achète via USDC. Retourne (success, sig, quantity_raw)."""
+    if DRY_RUN:
+        logger.info(f"[DRY RUN] Achat simulé : {amount_usdc} USDC de {mint[:8]}")
+        return True, "dry_run_sig", 1000000
     kp = get_keypair()
     if not kp:
         return False, "keypair manquant", 0
@@ -463,6 +467,10 @@ async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: fl
 
 async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) -> tuple[bool, str, float]:
     """Vend qty_raw tokens. Retourne (success, sig, usdc_received)."""
+    if DRY_RUN:
+        amount_usdc = qty_raw / 10**6
+        logger.info(f"[DRY RUN] Vente simulée : {qty_raw} tokens de {mint[:8]}")
+        return True, "dry_run_sig", amount_usdc
     kp = get_keypair()
     if not kp or qty_raw <= 0:
         return False, "keypair/qty manquant", 0.0
