@@ -143,13 +143,14 @@ async def get_usdc_balance() -> float:
     kp = get_keypair()
     if not kp:
         return 0.0
+    pubkey_str = str(kp.pubkey())
     try:
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "getTokenAccountsByOwner",
             "params": [
-                str(kp.pubkey()),
+                pubkey_str,
                 {"mint": USDC_MINT},
                 {"encoding": "jsonParsed"},
             ],
@@ -158,17 +159,42 @@ async def get_usdc_balance() -> float:
             async with session.post(
                 HELIUS_RPC_URL, json=payload, timeout=aiohttp.ClientTimeout(total=30)
             ) as r:
+                http_status = r.status
                 data = await r.json(content_type=None)
+
+        if http_status != 200:
+            logger.error(f"get_usdc_balance: HTTP {http_status} — réponse: {data}")
+            return 0.0
+
+        rpc_error = data.get("error")
+        if rpc_error:
+            logger.error(f"get_usdc_balance: erreur RPC {rpc_error}")
+            return 0.0
+
+        accounts = data.get("result", {}).get("value") or []
+        logger.debug(f"get_usdc_balance: wallet={pubkey_str[:8]}… {len(accounts)} compte(s) USDC trouvé(s)")
+
+        if not accounts:
+            logger.info(f"get_usdc_balance: aucun compte USDC pour {pubkey_str[:8]}… (wallet vide ou mauvaise clé ?)")
+            return 0.0
+
         total = 0.0
-        for acct in (data.get("result", {}).get("value") or []):
-            info = (
+        for acct in accounts:
+            token_info = (
                 acct.get("account", {})
                     .get("data", {})
                     .get("parsed", {})
                     .get("info", {})
-                    .get("tokenAmount", {})
             )
-            total += float(info.get("uiAmount") or 0)
+            token_amount = token_info.get("tokenAmount", {})
+            ui_amount = token_amount.get("uiAmount")
+            raw_amount = token_amount.get("amount", "0")
+            logger.debug(
+                f"  compte USDC mint={token_info.get('mint', '?')[:8]}… "
+                f"uiAmount={ui_amount} rawAmount={raw_amount}"
+            )
+            total += float(ui_amount or 0)
+
         return total
     except asyncio.TimeoutError:
         logger.error("get_usdc_balance: timeout RPC Solana")
@@ -577,6 +603,7 @@ async def process_token(session: aiohttp.ClientSession, mint: str,
     if mint in blacklist or mint in positions:
         return
 
+    tag = f"{symbol} ({mint[:8]}…)"
     pf_age = pumpfun.get("age_min", 999) if pumpfun else 999.0
 
     pair = await fetch_dexscreener_pair(session, mint)
@@ -589,43 +616,53 @@ async def process_token(session: aiohttp.ClientSession, mint: str,
         if cat:
             age_min = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime.fromtimestamp(cat / 1000, timezone.utc).replace(tzinfo=None)).total_seconds() / 60
 
-    if age_min > 10 or liq < 5_000 or (vol5 < 1_000 and not has_tg_signal(mint)):
-        blacklist.add(mint)
-        _save_state()
-        return
+    # Filtres d'entrée — loggés individuellement pour diagnostic
+    if age_min > 10:
+        logger.debug(f"[rejet] {tag} trop vieux ({age_min:.1f}min > 10min)")
+        blacklist.add(mint); _save_state(); return
+    if liq < 5_000:
+        logger.debug(f"[rejet] {tag} liquidité trop basse (${liq:,.0f} < $5 000)")
+        blacklist.add(mint); _save_state(); return
+    if vol5 < 1_000 and not has_tg_signal(mint):
+        logger.debug(f"[rejet] {tag} volume 5min trop bas (${vol5:,.0f} < $1 000, pas de signal TG)")
+        blacklist.add(mint); _save_state(); return
+
+    logger.info(f"[candidat] {tag} age={age_min:.1f}min liq=${liq:,.0f} vol5m=${vol5:,.0f}")
 
     gp = await check_goplus(session, mint)
     if gp:
         flags = goplus_red_flags(gp)
         if flags:
-            logger.info(f"Rejeté GoPlus {symbol} ({mint[:8]}): {flags}")
-            blacklist.add(mint)
-            _save_state()
-            return
+            logger.info(f"[rejet] {tag} GoPlus flags={flags}")
+            blacklist.add(mint); _save_state(); return
 
     tg_bonus = has_tg_signal(mint)
     score, reasons = compute_score(pair, pumpfun, gp, tg_bonus)
+    logger.info(f"[score] {tag} {score}/100 — {reasons}")
 
     if score < 65:
-        blacklist.add(mint)
-        _save_state()
-        return
+        logger.info(f"[rejet] {tag} score insuffisant ({score}/100 < 65)")
+        blacklist.add(mint); _save_state(); return
 
     if len(positions) >= MAX_POSITIONS:
+        logger.info(f"[rejet] {tag} max positions atteint ({MAX_POSITIONS})")
         return
-    if sum(p["amount_usdc"] for p in positions.values()) + TRADE_USDC > MAX_TOTAL_USDC:
+    exposed = sum(p["amount_usdc"] for p in positions.values())
+    if exposed + TRADE_USDC > MAX_TOTAL_USDC:
+        logger.info(f"[rejet] {tag} exposition max atteinte ({exposed:.2f}+{TRADE_USDC} > {MAX_TOTAL_USDC} USDC)")
         return
 
     usdc_bal = await get_usdc_balance()
     if usdc_bal < MIN_USDC:
+        logger.info(f"[rejet] {tag} solde USDC insuffisant ({usdc_bal:.2f} < {MIN_USDC})")
         await send_tg(f"SOLANA BOT — Solde USDC bas ({usdc_bal:.2f}). Achats suspendus.")
         return
 
+    logger.info(f"[achat] {tag} score={score}/100 solde={usdc_bal:.2f} USDC → achat {TRADE_USDC} USDC")
     ok, sig, qty_raw = await jupiter_buy(session, mint, TRADE_USDC)
     if not ok or qty_raw == 0:
-        blacklist.add(mint)
-        _save_state()
-        return
+        logger.error(f"[achat échoué] {tag} sig={sig}")
+        blacklist.add(mint); _save_state(); return
 
     entry_price = float((pair or {}).get("priceUsd", 0) or 0)
     if entry_price <= 0:
