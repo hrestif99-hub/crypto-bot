@@ -396,7 +396,7 @@ async def _jup_quote(session: aiohttp.ClientSession, url: str) -> dict | None:
 
 
 async def _jup_swap(session: aiohttp.ClientSession, payload: dict) -> dict | None:
-    url = f"{_JUP_BASE}/v6/swap"
+    url = f"{_JUP_BASE}/swap"
     try:
         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
             body = await r.text()
@@ -420,7 +420,7 @@ async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: fl
         return False, "keypair manquant", 0
     amount_raw = int(amount_usdc * 10**USDC_DECIMALS)  # 2.0 USDC → 2_000_000
     quote_url = (
-        f"{_JUP_BASE}/v6/quote"
+        f"{_JUP_BASE}/quote"
         f"?inputMint={USDC_MINT}&outputMint={mint}"
         f"&amount={amount_raw}&slippageBps={SLIPPAGE_BPS}"
     )
@@ -467,7 +467,7 @@ async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) 
     if not kp or qty_raw <= 0:
         return False, "keypair/qty manquant", 0.0
     quote_url = (
-        f"{_JUP_BASE}/v6/quote"
+        f"{_JUP_BASE}/quote"
         f"?inputMint={mint}&outputMint={USDC_MINT}"
         f"&amount={qty_raw}&slippageBps={SLIPPAGE_BPS}"
     )
@@ -892,22 +892,24 @@ async def auth_telethon():
 # ─── Sélection de l'endpoint Jupiter au démarrage ────────────
 async def _init_jupiter_endpoint():
     global _JUP_BASE
-    test_path = (
-        "/v6/quote"
-        "?inputMint=So11111111111111111111111111111111111111112"
-        "&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    test_url = (
+        "https://api.jup.ag/swap/v1/quote"
+        "?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        "&outputMint=So11111111111111111111111111111111111111112"
         "&amount=1000000&slippageBps=50"
     )
     async with aiohttp.ClientSession() as session:
         for base in _JUP_ENDPOINTS:
             try:
                 async with session.get(
-                    f"{base}{test_path}", timeout=aiohttp.ClientTimeout(total=10)
+                    test_url, timeout=aiohttp.ClientTimeout(total=10)
                 ) as r:
-                    if r.status in (200, 400):
-                        _JUP_BASE = base
-                        logger.info(f"Jupiter endpoint sélectionné : {base} (HTTP {r.status}) ✓")
-                        return
+                    if r.status == 200:
+                        data = await r.json()
+                        if "outAmount" in data:
+                            _JUP_BASE = base
+                            logger.info(f"Jupiter endpoint sélectionné : {base} ✓")
+                            return
                     logger.warning(f"Jupiter {base} : HTTP {r.status}, essai suivant…")
             except Exception as e:
                 logger.warning(f"Jupiter {base} inaccessible : {e}, essai suivant…")
