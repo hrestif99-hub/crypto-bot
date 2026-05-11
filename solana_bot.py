@@ -51,8 +51,8 @@ SLIPPAGE_BPS    = 1500      # 15%
 
 # Endpoints Jupiter testés au démarrage — le premier qui répond est utilisé
 _JUP_ENDPOINTS = [
-    "https://quote-api.jup.ag",
-    "https://jupiter-quote-api-node.jup.ag",
+    "https://api.jup.ag/swap/v1",
+    "https://api.jup.ag/swap/v1",
 ]
 _JUP_BASE: str = _JUP_ENDPOINTS[0]  # mis à jour par _init_jupiter_endpoint()
 
