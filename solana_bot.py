@@ -382,6 +382,9 @@ async def _jup_quote(session: aiohttp.ClientSession, url: str) -> dict | None:
                 if r.status == 200:
                     return json.loads(body)
                 # Erreur HTTP applicative → pas de retry (400 = mint invalide, etc.)
+                if "NO_ROUTES_FOUND" in body:
+                    logger.info(f"Jupiter NO_ROUTES_FOUND — essai pump.fun")
+                    return "NO_ROUTES_FOUND"
                 logger.error(
                     f"Jupiter quote HTTP {r.status}\n"
                     f"  URL  : {url}\n"
