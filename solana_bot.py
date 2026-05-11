@@ -147,14 +147,20 @@ async def get_usdc_balance() -> float:
         from solana.rpc.async_api import AsyncClient
         from solders.pubkey import Pubkey
         async with AsyncClient(HELIUS_RPC_URL) as client:
-            resp = await client.get_token_accounts_by_owner_json_parsed(
-                kp.pubkey(), {"mint": Pubkey.from_string(USDC_MINT)}
+            resp = await asyncio.wait_for(
+                client.get_token_accounts_by_owner_json_parsed(
+                    kp.pubkey(), {"mint": Pubkey.from_string(USDC_MINT)}
+                ),
+                timeout=30,
             )
             total = 0.0
             for acct in (resp.value or []):
                 info = acct.account.data.parsed["info"]["tokenAmount"]
                 total += float(info.get("uiAmount") or 0)
             return total
+    except asyncio.TimeoutError:
+        logger.error("get_usdc_balance: timeout RPC Solana")
+        return 0.0
     except Exception as e:
         logger.error(f"get_usdc_balance: {e}")
         return 0.0
@@ -332,11 +338,16 @@ async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: fl
         tx      = VersionedTransaction.from_bytes(raw)
         signed  = VersionedTransaction(tx.message, [kp])
         async with AsyncClient(HELIUS_RPC_URL) as client:
-            result = await client.send_raw_transaction(bytes(signed))
+            result = await asyncio.wait_for(
+                client.send_raw_transaction(bytes(signed)), timeout=30
+            )
         sig = str(result.value)
         qty_raw = int(quote.get("outAmount", 0))
         logger.info(f"BUY {mint[:8]} qty_raw={qty_raw} sig={sig[:12]}")
         return True, sig, qty_raw
+    except asyncio.TimeoutError:
+        logger.error(f"jupiter_buy: timeout RPC Solana ({mint[:8]})")
+        return False, "timeout", 0
     except Exception as e:
         logger.error(f"jupiter_buy sign/send: {e}")
         return False, str(e), 0
@@ -369,11 +380,16 @@ async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) 
         tx     = VersionedTransaction.from_bytes(raw)
         signed = VersionedTransaction(tx.message, [kp])
         async with AsyncClient(HELIUS_RPC_URL) as client:
-            result = await client.send_raw_transaction(bytes(signed))
+            result = await asyncio.wait_for(
+                client.send_raw_transaction(bytes(signed)), timeout=30
+            )
         sig = str(result.value)
         usdc = int(quote.get("outAmount", 0)) / 10**USDC_DECIMALS
         logger.info(f"SELL {mint[:8]} usdc={usdc:.2f} sig={sig[:12]}")
         return True, sig, usdc
+    except asyncio.TimeoutError:
+        logger.error(f"jupiter_sell: timeout RPC Solana ({mint[:8]})")
+        return False, "timeout", 0.0
     except Exception as e:
         logger.error(f"jupiter_sell sign/send: {e}")
         return False, str(e), 0.0
@@ -681,42 +697,62 @@ async def telethon_loop():
             "en local pour vous authentifier."
         )
         return
-    try:
-        from telethon import TelegramClient, events
-        from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError
-        client = TelegramClient("solana_bot_session", int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
-        await client.start()
+    from telethon import TelegramClient, events
+    from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError
 
-        # Résoudre chaque canal individuellement — ignorer ceux qui n'existent pas
-        valid_entities = []
-        for ch in CHANNELS:
-            try:
-                entity = await client.get_entity(ch)
-                valid_entities.append(entity)
-                logger.info(f"Telethon : canal @{ch} résolu")
-            except (UsernameNotOccupiedError, UsernameInvalidError, ValueError) as e:
-                logger.warning(f"Telethon : canal @{ch} introuvable, ignoré ({e})")
-            except Exception as e:
-                logger.warning(f"Telethon : erreur résolution @{ch}, ignoré ({e})")
+    while True:  # boucle de reconnexion automatique
+        try:
+            client = TelegramClient("solana_bot_session", int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+            await asyncio.wait_for(client.start(), timeout=30)
 
-        if not valid_entities:
-            logger.warning("Telethon : aucun canal valide — scraping désactivé")
-            await client.disconnect()
-            return
+            # Résoudre chaque canal individuellement avec timeout
+            valid_entities = []
+            for ch in CHANNELS:
+                try:
+                    entity = await asyncio.wait_for(client.get_entity(ch), timeout=30)
+                    valid_entities.append(entity)
+                    logger.info(f"Telethon : canal @{ch} résolu")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Telethon : timeout résolution @{ch}, ignoré")
+                except (UsernameNotOccupiedError, UsernameInvalidError, ValueError) as e:
+                    logger.warning(f"Telethon : canal @{ch} introuvable, ignoré ({e})")
+                except Exception as e:
+                    logger.warning(f"Telethon : erreur résolution @{ch}, ignoré ({e})")
 
-        @client.on(events.NewMessage(chats=valid_entities))
-        async def on_msg(event):
-            text    = event.raw_text or ""
-            channel = getattr(event.chat, "username", "unknown")
-            for addr in SOL_ADDR_RE.findall(text):
-                if 32 <= len(addr) <= 44:
-                    tg_mentions[addr][channel].append(datetime.utcnow())
-                    logger.debug(f"Signal TG {addr[:8]} @{channel}")
+            if not valid_entities:
+                logger.warning("Telethon : aucun canal valide — scraping désactivé")
+                await client.disconnect()
+                return
 
-        logger.info(f"Telethon connecté — écoute {len(valid_entities)} canaux")
-        await client.run_until_disconnected()
-    except Exception as e:
-        logger.error(f"telethon_loop: {e}")
+            @client.on(events.NewMessage(chats=valid_entities))
+            async def on_msg(event):
+                try:
+                    text    = event.raw_text or ""
+                    channel = getattr(event.chat, "username", "unknown")
+                    for addr in SOL_ADDR_RE.findall(text):
+                        if 32 <= len(addr) <= 44:
+                            tg_mentions[addr][channel].append(datetime.utcnow())
+                            logger.debug(f"Signal TG {addr[:8]} @{channel}")
+                except Exception as e:
+                    logger.error(f"on_msg handler: {e}")
+
+            logger.info(f"Telethon connecté — écoute {len(valid_entities)} canaux")
+            await client.run_until_disconnected()
+            logger.warning("Telethon : déconnecté — reconnexion dans 30s")
+        except asyncio.TimeoutError:
+            logger.error("Telethon : timeout connexion/start — reconnexion dans 30s")
+        except Exception as e:
+            logger.error(f"telethon_loop: {e} — reconnexion dans 30s")
+        await asyncio.sleep(30)
+
+
+# ─── Watchdog ────────────────────────────────────────────────
+async def watchdog_loop():
+    while True:
+        logger.info(
+            f"[watchdog] bot alive — positions={len(positions)} blacklist={len(blacklist)}"
+        )
+        await asyncio.sleep(60)
 
 
 # ─── Auth locale (one-shot) ───────────────────────────────────
@@ -745,6 +781,7 @@ async def main():
         monitor_loop(),
         pyramid_loop(),
         telethon_loop(),
+        watchdog_loop(),
     )
 
 
