@@ -6,3 +6,6 @@ primary_region = "cdg"
 
 [processes]
   app = "python solana_bot.py"
+
+[deploy]
+  release_command = ""
