@@ -683,9 +683,28 @@ async def telethon_loop():
         return
     try:
         from telethon import TelegramClient, events
+        from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError
         client = TelegramClient("solana_bot_session", int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+        await client.start()
 
-        @client.on(events.NewMessage(chats=CHANNELS))
+        # Résoudre chaque canal individuellement — ignorer ceux qui n'existent pas
+        valid_entities = []
+        for ch in CHANNELS:
+            try:
+                entity = await client.get_entity(ch)
+                valid_entities.append(entity)
+                logger.info(f"Telethon : canal @{ch} résolu")
+            except (UsernameNotOccupiedError, UsernameInvalidError, ValueError) as e:
+                logger.warning(f"Telethon : canal @{ch} introuvable, ignoré ({e})")
+            except Exception as e:
+                logger.warning(f"Telethon : erreur résolution @{ch}, ignoré ({e})")
+
+        if not valid_entities:
+            logger.warning("Telethon : aucun canal valide — scraping désactivé")
+            await client.disconnect()
+            return
+
+        @client.on(events.NewMessage(chats=valid_entities))
         async def on_msg(event):
             text    = event.raw_text or ""
             channel = getattr(event.chat, "username", "unknown")
@@ -694,8 +713,7 @@ async def telethon_loop():
                     tg_mentions[addr][channel].append(datetime.utcnow())
                     logger.debug(f"Signal TG {addr[:8]} @{channel}")
 
-        await client.start()
-        logger.info("Telethon connecté — écoute des canaux crypto")
+        logger.info(f"Telethon connecté — écoute {len(valid_entities)} canaux")
         await client.run_until_disconnected()
     except Exception as e:
         logger.error(f"telethon_loop: {e}")
