@@ -49,6 +49,13 @@ PYRAMID_COOL    = 30 * 60   # 30 min
 PYRAMID_TRIGGER = 30.0      # +30%
 SLIPPAGE_BPS    = 1500      # 15%
 
+# Endpoints Jupiter testés au démarrage — le premier qui répond est utilisé
+_JUP_ENDPOINTS = [
+    "https://quote-api.jup.ag",
+    "https://jupiter-quote-api-node.jup.ag",
+]
+_JUP_BASE: str = _JUP_ENDPOINTS[0]  # mis à jour par _init_jupiter_endpoint()
+
 STOP_LOSS_PCT   = -30.0
 TP_HALF_PCT     = 50.0      # vendre 50% à +50%
 TP_FULL_PCT     = 100.0     # vendre 100% à +100%
@@ -389,7 +396,7 @@ async def _jup_quote(session: aiohttp.ClientSession, url: str) -> dict | None:
 
 
 async def _jup_swap(session: aiohttp.ClientSession, payload: dict) -> dict | None:
-    url = "https://quote-api.jup.ag/v6/swap"
+    url = f"{_JUP_BASE}/v6/swap"
     try:
         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as r:
             body = await r.text()
@@ -413,7 +420,7 @@ async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: fl
         return False, "keypair manquant", 0
     amount_raw = int(amount_usdc * 10**USDC_DECIMALS)  # 2.0 USDC → 2_000_000
     quote_url = (
-        f"https://quote-api.jup.ag/v6/quote"
+        f"{_JUP_BASE}/v6/quote"
         f"?inputMint={USDC_MINT}&outputMint={mint}"
         f"&amount={amount_raw}&slippageBps={SLIPPAGE_BPS}"
     )
@@ -460,7 +467,7 @@ async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) 
     if not kp or qty_raw <= 0:
         return False, "keypair/qty manquant", 0.0
     quote_url = (
-        f"https://quote-api.jup.ag/v6/quote"
+        f"{_JUP_BASE}/v6/quote"
         f"?inputMint={mint}&outputMint={USDC_MINT}"
         f"&amount={qty_raw}&slippageBps={SLIPPAGE_BPS}"
     )
@@ -882,30 +889,32 @@ async def auth_telethon():
     await client.disconnect()
 
 
-# ─── Test de connectivité Jupiter au démarrage ────────────────
-async def _check_jupiter_connectivity():
-    # SOL → USDC, 0.001 SOL — juste pour vérifier que l'hôte répond
-    url = (
-        "https://quote-api.jup.ag/v6/quote"
+# ─── Sélection de l'endpoint Jupiter au démarrage ────────────
+async def _init_jupiter_endpoint():
+    global _JUP_BASE
+    test_path = (
+        "/v6/quote"
         "?inputMint=So11111111111111111111111111111111111111112"
         "&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         "&amount=1000000&slippageBps=50"
     )
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status in (200, 400):
-                    logger.info(f"Jupiter API accessible (HTTP {r.status}) ✓")
-                    return True
-                body = await r.text()
-                logger.warning(f"Jupiter API répond HTTP {r.status} : {body[:200]}")
-                return False
-    except Exception as e:
-        logger.error(
-            f"Jupiter API INACCESSIBLE : {e}\n"
-            f"  → Vérifier la résolution DNS de quote-api.jup.ag depuis Railway"
-        )
-        return False
+    async with aiohttp.ClientSession() as session:
+        for base in _JUP_ENDPOINTS:
+            try:
+                async with session.get(
+                    f"{base}{test_path}", timeout=aiohttp.ClientTimeout(total=10)
+                ) as r:
+                    if r.status in (200, 400):
+                        _JUP_BASE = base
+                        logger.info(f"Jupiter endpoint sélectionné : {base} (HTTP {r.status}) ✓")
+                        return
+                    logger.warning(f"Jupiter {base} : HTTP {r.status}, essai suivant…")
+            except Exception as e:
+                logger.warning(f"Jupiter {base} inaccessible : {e}, essai suivant…")
+    logger.error(
+        f"Jupiter inaccessible sur tous les endpoints {_JUP_ENDPOINTS}\n"
+        f"  → Les achats/ventes seront impossibles jusqu'à rétablissement DNS"
+    )
 
 
 # ─── Main ─────────────────────────────────────────────────────
@@ -917,7 +926,7 @@ async def main():
     else:
         logger.info(f"Wallet : {kp.pubkey()}")
 
-    await _check_jupiter_connectivity()
+    await _init_jupiter_endpoint()
     await send_tg("SOLANA MEMECOIN BOT DÉMARRÉ\nScan DexScreener + Pump.fun actif")
 
     await asyncio.gather(
