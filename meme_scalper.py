@@ -335,11 +335,23 @@ async def jupiter_buy(session: aiohttp.ClientSession, mint: str, amount_usdc: fl
         return False, "swap échoué", 0
     try:
         from solders.transaction import VersionedTransaction
+        from solders.message import MessageV0, Message as LegacyMessage
+        from solders.hash import Hash
         from solana.rpc.async_api import AsyncClient
         tx_b64 = swap["swapTransaction"].replace('-', '+').replace('_', '/')
         raw    = base64.b64decode(tx_b64 + '==')
         tx     = VersionedTransaction.from_bytes(raw)
-        signed = VersionedTransaction(tx.message, [kp])
+        bh_payload = {"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": [{"commitment": "finalized"}]}
+        async with session.post(HELIUS_RPC_URL, json=bh_payload, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            bh_data = await r.json(content_type=None)
+        fresh_blockhash = bh_data["result"]["value"]["blockhash"]
+        bh  = Hash.from_string(fresh_blockhash)
+        msg = tx.message
+        if isinstance(msg, MessageV0):
+            new_msg = MessageV0(msg.header, msg.account_keys, bh, msg.instructions, msg.address_table_lookups)
+        else:
+            new_msg = LegacyMessage(msg.header, msg.account_keys, bh, msg.instructions)
+        signed = VersionedTransaction(new_msg, [kp])
         async with AsyncClient(HELIUS_RPC_URL) as client:
             result = await asyncio.wait_for(client.send_raw_transaction(bytes(signed)), timeout=30)
         sig = str(result.value)
@@ -382,11 +394,23 @@ async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) 
         return False, "swap vente échoué", 0.0
     try:
         from solders.transaction import VersionedTransaction
+        from solders.message import MessageV0, Message as LegacyMessage
+        from solders.hash import Hash
         from solana.rpc.async_api import AsyncClient
         tx_b64 = swap["swapTransaction"].replace('-', '+').replace('_', '/')
         raw    = base64.b64decode(tx_b64 + '==')
         tx     = VersionedTransaction.from_bytes(raw)
-        signed = VersionedTransaction(tx.message, [kp])
+        bh_payload = {"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash", "params": [{"commitment": "finalized"}]}
+        async with session.post(HELIUS_RPC_URL, json=bh_payload, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            bh_data = await r.json(content_type=None)
+        fresh_blockhash = bh_data["result"]["value"]["blockhash"]
+        bh  = Hash.from_string(fresh_blockhash)
+        msg = tx.message
+        if isinstance(msg, MessageV0):
+            new_msg = MessageV0(msg.header, msg.account_keys, bh, msg.instructions, msg.address_table_lookups)
+        else:
+            new_msg = LegacyMessage(msg.header, msg.account_keys, bh, msg.instructions)
+        signed = VersionedTransaction(new_msg, [kp])
         async with AsyncClient(HELIUS_RPC_URL) as client:
             result = await asyncio.wait_for(client.send_raw_transaction(bytes(signed)), timeout=30)
         sig  = str(result.value)
