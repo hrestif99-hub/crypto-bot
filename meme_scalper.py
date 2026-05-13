@@ -42,18 +42,20 @@ TRADE_USDC          = 5.0
 MAX_POSITIONS       = 5
 MAX_TOTAL_USDC      = 25.0
 MIN_USDC            = 6.0
-SCAN_INTERVAL       = 60
+SCAN_INTERVAL       = 10
 MONITOR_INTERVAL    = 30
 
 SLIPPAGE_BPS        = 1500
 JITO_TIP_LAMPORTS   = int(os.environ.get("JITO_TIP_LAMPORTS", "100000"))
 MIN_SOL_FOR_RENT    = 0.005   # SOL minimum : rent ATA (~0.00204) + fees + marge
 
-TP1_PCT             = 20.0
-TP2_PCT             = 50.0
-SL_PCT              = -10.0
-TRAILING_PCT        = 20.0
-TRAILING_ACTIVATION = 20.0
+PYRAMIDING_ENABLED  = False
+
+TP1_PCT             = 8.0
+TP2_PCT             = 15.0
+SL_PCT              = -7.0
+TRAILING_PCT        = 8.0
+TRAILING_ACTIVATION = 10.0
 
 POSITIONS_FILE = "positions.json"
 
@@ -424,6 +426,32 @@ async def jupiter_sell(session: aiohttp.ClientSession, mint: str, qty_raw: int) 
         return False, str(e), 0.0
 
 
+# ─── Sécurité RugCheck ───────────────────────────────────────
+async def check_rugcheck(session: aiohttp.ClientSession, mint: str) -> bool:
+    """Retourne True si le token est Good ou Excellent selon RugCheck."""
+    try:
+        url = f"https://api.rugcheck.xyz/v1/tokens/{mint}/report"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            if r.status != 200:
+                logger.warning(f"RugCheck HTTP {r.status} pour {mint[:8]} — rejeté")
+                return False
+            data = await r.json(content_type=None)
+        score = data.get("score", 9999)
+        risks = data.get("risks", [])
+        if any(risk.get("level") == "critical" for risk in risks):
+            logger.info(f"RugCheck {mint[:8]}: risque critique — rejeté")
+            return False
+        # score < 2000 → Good/Excellent ; au-dessus → rejeté
+        if score > 2000:
+            logger.info(f"RugCheck {mint[:8]}: score={score} — rejeté")
+            return False
+        logger.info(f"RugCheck {mint[:8]}: score={score} — OK")
+        return True
+    except Exception as e:
+        logger.error(f"check_rugcheck {mint[:8]}: {e} — rejeté")
+        return False
+
+
 # ─── Logique d'entrée ─────────────────────────────────────────
 async def check_entry(session: aiohttp.ClientSession, symbol: str, mint: str):
     sol_bal = await get_sol_balance(session)
@@ -466,13 +494,16 @@ async def check_entry(session: aiohttp.ClientSession, symbol: str, mint: str):
         f"VolR={vol_r:.2f} BullC={bull_candles}/3"
     )
 
-    if not (35 <= rsi <= 72):
+    if not (55 <= rsi <= 80):
         return
-    if macd_line <= sig_l:
+    if macd_line <= sig_l or macd_line <= 0:
         return
-    if vol_r < 1.1:
+    if vol_r < 1.5:
         return
     if bull_candles < 2:
+        return
+
+    if not await check_rugcheck(session, mint):
         return
 
     usdc_bal = await get_usdc_balance()
