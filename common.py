@@ -158,7 +158,9 @@ async def get_best_pair(session: aiohttp.ClientSession, mint: str) -> dict | Non
         pairs = [p for p in (data.get("pairs") or []) if p.get("chainId") == "solana"]
         if not pairs:
             return None
-        pairs.sort(key=lambda x: float((x.get("liquidity") or {}).get("usd", 0) or 0), reverse=True)
+        # Tri par volume 24h : le marché actif d'un token (prix le plus fiable,
+        # volume représentatif). Indispensable pour les tokens établis.
+        pairs.sort(key=lambda x: float((x.get("volume") or {}).get("h24", 0) or 0), reverse=True)
         return pairs[0]
     except Exception:
         return None
