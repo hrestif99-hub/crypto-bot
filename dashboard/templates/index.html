@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crypto Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #0a0a0f;
+      --surface:    #12121a;
+      --surface2:   #1a1a26;
+      --border:     #2d2d3f;
+      --meme:       #7c3aed;
+      --solana:     #2563eb;
+      --green:      #10b981;
+      --red:        #ef4444;
+      --yellow:     #f59e0b;
+      --text:       #e2e8f0;
+      --text-dim:   #94a3b8;
+      --text-muted: #64748b;
+    }
+
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; min-height: 100vh; }
+
+    /* ── Header ──────────────────────────────────────────────── */
+    .header {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 0 20px; height: 52px;
+      display: flex; align-items: center; justify-content: space-between;
+      position: sticky; top: 0; z-index: 100;
+    }
+    .header-title { font-size: 17px; font-weight: 700; letter-spacing: -.3px; }
+    .header-title .accent { color: var(--meme); }
+    .header-right { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--text-muted); }
+    .live-dot {
+      display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green); animation: pulse 2s infinite; margin-right: 4px;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    .logout-btn { color: var(--text-muted); text-decoration: none; font-size: 12px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 4px; }
+    .logout-btn:hover { color: var(--text); border-color: var(--text-muted); }
+
+    /* ── Tabs ─────────────────────────────────────────────────── */
+    .tabs { background: var(--surface); border-bottom: 1px solid var(--border); display: flex; padding: 0 20px; gap: 2px; overflow-x: auto; }
+    .tab { padding: 10px 16px; cursor: pointer; font-size: 13px; color: var(--text-muted); border-bottom: 2px solid transparent; transition: color .15s; white-space: nowrap; user-select: none; }
+    .tab:hover { color: var(--text-dim); }
+    .tab.active { color: var(--meme); border-bottom-color: var(--meme); }
+
+    /* ── Layout ───────────────────────────────────────────────── */
+    .content { padding: 20px; max-width: 1400px; margin: 0 auto; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+    @media (max-width: 720px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    /* ── Cards ────────────────────────────────────────────────── */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
+    .card + .card { margin-top: 16px; }
+    .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+    .card-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: var(--text-muted); }
+
+    /* ── Badges ───────────────────────────────────────────────── */
+    .badge { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 99px; letter-spacing: .3px; }
+    .badge.meme   { background: rgba(124,58,237,.15); color: var(--meme); }
+    .badge.solana { background: rgba(37,99,235,.15);  color: var(--solana); }
+    .badge.paper  { background: rgba(245,158,11,.12); color: var(--yellow); }
+    .badge.gt     { background: rgba(16,185,129,.12); color: var(--green); }
+    .badge.ds     { background: rgba(100,116,139,.12); color: var(--text-muted); }
+
+    /* ── Stats ────────────────────────────────────────────────── */
+    .stat-big  { font-size: 30px; font-weight: 700; letter-spacing: -1px; margin-bottom: 3px; }
+    .stat-lbl  { font-size: 12px; color: var(--text-muted); }
+    .stats-row { display: flex; gap: 24px; margin-top: 14px; flex-wrap: wrap; }
+    .stat-mini .val { font-size: 16px; font-weight: 600; }
+    .stat-mini .lbl { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+    .neu { color: var(--text-muted); }
+    .wr-bar { height: 3px; background: var(--surface2); border-radius: 2px; margin-top: 12px; overflow: hidden; }
+    .wr-fill { height: 100%; background: var(--green); border-radius: 2px; transition: width .5s; }
+    .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: var(--text-muted); margin: 20px 0 10px; }
+
+    /* ── Buttons ──────────────────────────────────────────────── */
+    .btn-sm {
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--text-muted); padding: 4px 10px; font-size: 12px; cursor: pointer;
+      transition: color .15s, border-color .15s;
+    }
+    .btn-sm:hover { color: var(--text); border-color: var(--text-dim); }
+
+    /* ── Tables ───────────────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th { text-align: left; padding: 7px 12px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); border-bottom: 1px solid var(--border); white-space: nowrap; }
+    tbody tr { border-bottom: 1px solid rgba(45,45,63,.5); transition: background .1s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--surface2); }
+    tbody td { padding: 10px 12px; color: var(--text-dim); white-space: nowrap; }
+    td.tok { font-weight: 700; color: var(--text); font-size: 14px; cursor: pointer; }
+    td.tok:hover { color: var(--meme); text-decoration: underline dotted; }
+    .reason { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; letter-spacing: .3px; }
+    .reason.TP1, .reason.TP2, .reason.TP3, .reason.TP_HALF, .reason.TP_FULL { background: rgba(16,185,129,.15); color: var(--green); }
+    .reason.TRAILING          { background: rgba(245,158,11,.15);  color: var(--yellow); }
+    .reason.SL                { background: rgba(239,68,68,.15);   color: var(--red); }
+    .reason.ROTATION          { background: rgba(245,158,11,.15);  color: var(--yellow); }
+    .reason.TIME_STOP         { background: rgba(245,158,11,.15);  color: var(--yellow); }
+    .reason.STALL_EXIT        { background: rgba(245,158,11,.15);  color: var(--yellow); }
+
+    /* ── Chart ────────────────────────────────────────────────── */
+    .chart-wrap { position: relative; height: 380px; }
+    .chart-hint { font-size: 11px; color: var(--text-muted); margin-top: 8px; text-align: center; }
+
+    /* ── Logs ─────────────────────────────────────────────────── */
+    .logs-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .logs-grid { grid-template-columns: 1fr; } }
+    .log-box { background: #07070d; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .log-head { background: var(--surface); padding: 9px 14px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+    .log-name { font-size: 13px; font-weight: 600; color: var(--text-dim); }
+    .log-filter { margin-left: auto; background: #0d0d17; border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 3px 8px; font-size: 12px; width: 130px; }
+    .log-filter:focus { outline: none; border-color: var(--meme); }
+    .log-body { height: 480px; overflow-y: auto; padding: 8px 10px; font-family: 'Cascadia Code','Consolas',monospace; font-size: 11px; line-height: 1.6; }
+    .log-body::-webkit-scrollbar { width: 5px; }
+    .log-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .ll { word-break: break-all; }
+    .ll.err  { color: #fca5a5; }
+    .ll.warn { color: #fcd34d; }
+    .ll.buy  { color: #6ee7b7; }
+    .ll.sell { color: #93c5fd; }
+    .ll.def  { color: #475569; }
+
+    /* ── Token modal ──────────────────────────────────────────── */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.78); z-index: 500;
+      align-items: center; justify-content: center; padding: 20px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-box {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+      width: 100%; max-width: 820px; max-height: 90vh; overflow-y: auto;
+      animation: modal-in .18s ease;
+    }
+    @keyframes modal-in { from { opacity:0; transform: scale(.97); } to { opacity:1; transform: scale(1); } }
+    .modal-head {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 18px; border-bottom: 1px solid var(--border);
+    }
+    .modal-symbol { font-size: 16px; font-weight: 700; }
+    .modal-close { margin-left: auto; background: none; border: none; color: var(--text-muted); font-size: 22px; line-height: 1; cursor: pointer; padding: 0 2px; }
+    .modal-close:hover { color: var(--text); }
+    .modal-body { padding: 18px; }
+    .modal-chart-wrap { position: relative; height: 320px; margin-bottom: 16px; }
+    .modal-meta { display: flex; gap: 20px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--border); }
+    .modal-meta-item .lbl { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
+    .modal-meta-item .val { font-size: 14px; font-weight: 600; color: var(--text-dim); }
+    .modal-loading { display: flex; align-items: center; justify-content: center; height: 320px; color: var(--text-muted); font-size: 13px; gap: 10px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--meme); border-radius: 50%; animation: spin .7s linear infinite; }
+    .empty { text-align: center; padding: 36px; color: var(--text-muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────── -->
+<div class="header">
+  <div class="header-title"><span class="accent">⬡</span> Crypto Dashboard</div>
+  <div class="header-right">
+    <span><span class="live-dot"></span>Live</span>
+    <span id="hd-update" style="color:var(--text-dim)">—</span>
+    <span id="hd-countdown">30s</span>
+    <a href="/logout" class="logout-btn">Déco</a>
+  </div>
+</div>
+
+<!-- ── Tabs ────────────────────────────────────────────────── -->
+<div class="tabs">
+  <div class="tab active"  data-tab="overview">  Vue d'ensemble</div>
+  <div class="tab"         data-tab="positions"> Positions ouvertes</div>
+  <div class="tab"         data-tab="history">   Historique</div>
+  <div class="tab"         data-tab="balance">   Courbe solde</div>
+  <div class="tab"         data-tab="logs">      Logs en direct</div>
+</div>
+
+<div class="content">
+
+  <!-- ── OVERVIEW ────────────────────────────────────────────── -->
+  <div id="tab-overview" class="panel active">
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Meme Scalper</div>
+          <div style="display:flex;gap:6px"><span class="badge meme">MEME</span><span class="badge paper">PAPER</span></div>
+        </div>
+        <div id="ov-balance" class="stat-big">—</div>
+        <div class="stat-lbl">Solde USDC</div>
+        <div class="stats-row">
+          <div class="stat-mini"><div id="ov-pnl" class="val">—</div><div class="lbl">P&amp;L total</div></div>
+          <div class="stat-mini"><div id="ov-wr" class="val">—</div><div class="lbl">Win rate</div></div>
+          <div class="stat-mini"><div id="ov-trades" class="val">—</div><div class="lbl">Trades</div></div>
+          <div class="stat-mini"><div id="ov-mpos" class="val">—</div><div class="lbl">Positions</div></div>
+        </div>
+        <div class="wr-bar"><div id="ov-wr-bar" class="wr-fill" style="width:0%"></div></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title">Solana Bot</div>
+          <span class="badge solana">DexScreener</span>
+        </div>
+        <div id="ov-sbalance" class="stat-big">—</div>
+        <div class="stat-lbl">Solde USDC</div>
+        <div class="stats-row">
+          <div class="stat-mini"><div id="ov-spnl-total" class="val">—</div><div class="lbl">P&amp;L total</div></div>
+          <div class="stat-mini"><div id="ov-strades" class="val">—</div><div class="lbl">Trades fermés</div></div>
+          <div class="stat-mini"><div id="ov-spos" class="val">—</div><div class="lbl">Positions</div></div>
+          <div class="stat-mini"><div id="ov-sdaily" class="val">—</div><div class="lbl">P&amp;L journalier</div></div>
+          <div class="stat-mini"><div id="ov-sstreak" class="val">—</div><div class="lbl">Streak pertes</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="section-title">Positions ouvertes — aperçu <span style="font-weight:400;color:var(--text-muted)">(cliquer sur un token pour voir le graphique)</span></div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Token</th><th>Bot</th><th>Investi</th><th>Entrée</th><th>Actuel</th><th>P&amp;L %</th><th>P&amp;L USDC</th><th>Ouvert le</th></tr></thead>
+          <tbody id="ov-pos-tbody"><tr><td colspan="8" class="empty"><span class="spinner" style="display:inline-block"></span></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── POSITIONS ────────────────────────────────────────────── -->
+  <div id="tab-positions" class="panel">
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">Toutes les positions ouvertes</div>
+        <span id="pos-count" style="font-size:12px;color:var(--text-muted)">—</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Token</th><th>Bot</th><th>Investi</th><th>Prix entrée</th><th>Prix actuel</th><th>P&amp;L %</th><th>P&amp;L USDC</th><th>Ouvert le</th></tr></thead>
+          <tbody id="pos-tbody"><tr><td colspan="8" class="empty"><span class="spinner" style="display:inline-block"></span></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── HISTORY ──────────────────────────────────────────────── -->
+  <div id="tab-history" class="panel">
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">Trades fermés — meme_scalper</div>
+        <span id="hist-summary" style="font-size:12px;color:var(--text-muted)">—</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>Token</th><th>Raison de sortie</th><th>P&amp;L USDC</th><th>Date</th></tr></thead>
+          <tbody id="hist-tbody"><tr><td colspan="5" class="empty"><span class="spinner" style="display:inline-block"></span></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-head">
+        <div class="card-title">Solana Bot — Trades fermés</div>
+        <span id="shist-count" style="font-size:12px;color:var(--text-muted)">—</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Token</th><th>Raison</th><th>Investi</th><th>Entrée</th><th>Sortie</th><th>P&amp;L %</th><th>P&amp;L USDC</th><th>Ouvert le</th><th>Fermé le</th></tr></thead>
+          <tbody id="shist-tbody"><tr><td colspan="9" class="empty"><span class="spinner" style="display:inline-block"></span></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── BALANCE CHART ─────────────────────────────────────────── -->
+  <div id="tab-balance" class="panel">
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">Évolution du solde — meme_scalper (paper mode)</div>
+        <button class="btn-sm" onclick="if(balChart) balChart.resetZoom()">↺ Reset zoom</button>
+      </div>
+      <div class="chart-wrap"><canvas id="balance-chart"></canvas></div>
+      <p class="chart-hint">Molette = zoom · Clic+glisser = pan · Double-clic = reset</p>
+    </div>
+  </div>
+
+  <!-- ── LOGS ─────────────────────────────────────────────────── -->
+  <div id="tab-logs" class="panel">
+    <div class="logs-grid">
+      <div class="log-box">
+        <div class="log-head">
+          <span class="badge meme">MEME</span>
+          <span class="log-name">meme_scalper.log</span>
+          <input class="log-filter" id="meme-filter" placeholder="Filtre ex: ERROR" oninput="applyFilter('meme')">
+        </div>
+        <div class="log-body" id="meme-log"></div>
+      </div>
+      <div class="log-box">
+        <div class="log-head">
+          <span class="badge solana">SOLANA</span>
+          <span class="log-name">solana_logs.txt</span>
+          <input class="log-filter" id="solana-filter" placeholder="Filtre ex: ERROR" oninput="applyFilter('solana')">
+        </div>
+        <div class="log-body" id="solana-log"></div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /content -->
+
+<!-- ── Token chart modal ─────────────────────────────────────── -->
+<div id="token-modal" class="modal-overlay" onclick="modalOverlayClick(event)">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="modal-symbol" class="modal-symbol">—</span>
+      <span id="modal-source-badge" class="badge gt" style="display:none"></span>
+      <button class="modal-close" onclick="closeTokenModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="modal-chart-area">
+        <div class="modal-loading"><span class="spinner"></span>Chargement du graphique…</div>
+      </div>
+      <div class="modal-meta" id="modal-meta" style="display:none">
+        <div class="modal-meta-item"><div class="lbl">Prix d'entrée</div><div id="mm-entry" class="val">—</div></div>
+        <div class="modal-meta-item"><div class="lbl">TP1 (+15%)</div><div id="mm-tp1" class="val pos">—</div></div>
+        <div class="modal-meta-item"><div class="lbl">TP2 (+30%)</div><div id="mm-tp2" class="val pos">—</div></div>
+        <div class="modal-meta-item"><div class="lbl">Stop-loss (-8%)</div><div id="mm-sl" class="val neg">—</div></div>
+        <div class="modal-meta-item"><div class="lbl">Ouvert le</div><div id="mm-date" class="val">—</div></div>
+        <div class="modal-meta-item"><div class="lbl">P&amp;L actuel</div><div id="mm-pnl" class="val">—</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────
+const TABS        = ['overview','positions','history','balance','logs'];
+const REFRESH_SEC = 30;
+let apiData       = null;
+let balChart      = null;
+let tokenChart    = null;
+let positionsMap  = {};   // mint -> position object
+let memeLogs      = [];
+let solanaLogs    = [];
+let solanaHistory = [];
+let solanaStatus  = null;
+let currentTab    = 'overview';
+let countdown     = REFRESH_SEC;
+
+// ── Crosshair plugin (registered once globally) ───────────────
+const crosshairPlugin = {
+  id: 'crosshair',
+  afterDraw(chart) {
+    if (chart._crosshairX == null) return;
+    const { ctx, chartArea: { top, bottom, left, right } } = chart;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(148,163,184,0.4)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(chart._crosshairX, top); ctx.lineTo(chart._crosshairX, bottom); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(left, chart._crosshairY); ctx.lineTo(right, chart._crosshairY); ctx.stroke();
+    ctx.restore();
+  }
+};
+Chart.register(crosshairPlugin);
+
+// ── Tab switching ─────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(el => el.addEventListener('click', () => showTab(el.dataset.tab)));
+function showTab(name) {
+  TABS.forEach(t => document.getElementById('tab-' + t).classList.toggle('active', t === name));
+  document.querySelectorAll('.tab').forEach((el, i) => el.classList.toggle('active', TABS[i] === name));
+  currentTab = name;
+  if (name === 'logs')    fetchLogs();
+  if (name === 'balance') fetchBalanceHistory();
+  if (name === 'history') fetchSolanaHistory();
+}
+
+// ── Formatting helpers ────────────────────────────────────────
+function fmtPrice(n) {
+  const f = parseFloat(n);
+  if (!f || isNaN(f)) return '—';
+  if (f < 0.000001) return '$' + f.toExponential(2);
+  if (f < 0.001)    return '$' + f.toFixed(6);
+  if (f < 1)        return '$' + f.toFixed(4);
+  return '$' + f.toFixed(2);
+}
+function fmtPnl(v, suffix = ' USDC') {
+  const f = parseFloat(v);
+  if (isNaN(f)) return '—';
+  return (f > 0 ? '+' : '') + f.toFixed(2) + suffix;
+}
+function pnlClass(v) {
+  const f = parseFloat(v);
+  return f > 0 ? 'pos' : f < 0 ? 'neg' : 'neu';
+}
+function fmtDate(s) {
+  if (!s) return '—';
+  try {
+    const d = new Date(s.replace(' ', 'T'));
+    return d.toLocaleDateString('fr-FR', {day:'2-digit', month:'2-digit'}) + ' '
+         + d.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
+  } catch { return s.substring(0, 16); }
+}
+function badgeHtml(bot) {
+  return bot === 'meme_scalper'
+    ? '<span class="badge meme">MEME</span>'
+    : '<span class="badge solana">SOL</span>';
+}
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Position row ──────────────────────────────────────────────
+function posRow(p) {
+  const has = p.current_price > 0;
+  const pPct  = has ? (p.pnl_pct > 0 ? '+' : '') + p.pnl_pct.toFixed(1) + '%' : '—';
+  const pUsdc = has ? fmtPnl(p.pnl_usdc) : '—';
+  const pCls  = has ? pnlClass(p.pnl_pct)  : 'neu';
+  const uCls  = has ? pnlClass(p.pnl_usdc) : 'neu';
+  const half  = p.tp1_done ? ' <span style="font-size:10px;color:var(--green)">½</span>' : '';
+  return `<tr>
+    <td class="tok" onclick="openTokenChart('${esc(p.mint)}')">${esc(p.symbol)}${half}</td>
+    <td>${badgeHtml(p.bot)}</td>
+    <td>${p.amount_usdc} USDC</td>
+    <td>${fmtPrice(p.entry_price)}</td>
+    <td>${has ? fmtPrice(p.current_price) : '<span style="color:var(--text-muted)">—</span>'}</td>
+    <td class="${pCls}">${pPct}</td>
+    <td class="${uCls}">${pUsdc}</td>
+    <td>${fmtDate(p.open_ts)}</td>
+  </tr>`;
+}
+
+// ── Fetch main data ───────────────────────────────────────────
+async function fetchData() {
+  try {
+    const res = await fetch('/api/data');
+    if (!res.ok) return;
+    apiData = await res.json();
+    // Build positions map for modal
+    positionsMap = {};
+    [...apiData.meme.positions, ...apiData.solana.positions].forEach(p => { positionsMap[p.mint] = p; });
+    renderOverview();
+    renderPositions();
+    renderHistory();
+    document.getElementById('hd-update').textContent = apiData.updated_at || '';
+    fetchSolanaStatus();
+  } catch (e) { console.error(e); }
+}
+
+// ── Overview ─────────────────────────────────────────────────
+function renderOverview() {
+  if (!apiData) return;
+  const m = apiData.meme, s = apiData.solana;
+  const balEl = document.getElementById('ov-balance');
+  balEl.textContent = m.balance + ' USDC';
+  balEl.className = 'stat-big ' + (m.balance >= 200 ? 'pos' : m.balance < 180 ? 'neg' : '');
+  const pnlEl = document.getElementById('ov-pnl');
+  pnlEl.textContent = fmtPnl(m.pnl_total);
+  pnlEl.className = 'val ' + pnlClass(m.pnl_total);
+  const wrEl = document.getElementById('ov-wr');
+  wrEl.textContent = m.trades_total > 0 ? m.win_rate + '%' : '—';
+  wrEl.className = 'val ' + (m.win_rate >= 50 ? 'pos' : m.win_rate > 0 ? 'neg' : 'neu');
+  document.getElementById('ov-trades').textContent = m.trades_total > 0 ? `${m.trades_total} (${m.wins}W/${m.losses}L)` : '0';
+  document.getElementById('ov-mpos').textContent = m.positions.length;
+  document.getElementById('ov-wr-bar').style.width = m.win_rate + '%';
+  document.getElementById('ov-spos').textContent = s.positions.length;
+  const dailyEl = document.getElementById('ov-sdaily');
+  if (s.daily_pnl !== undefined && s.daily_pnl !== null) {
+    dailyEl.textContent = fmtPnl(s.daily_pnl);
+    dailyEl.className = 'val ' + pnlClass(s.daily_pnl);
+  }
+  const streakEl = document.getElementById('ov-sstreak');
+  if (s.streak !== undefined && s.streak !== null) {
+    streakEl.textContent = s.streak;
+    streakEl.className = 'val ' + (s.streak >= 2 ? 'neg' : s.streak === 0 ? 'pos' : '');
+  }
+  const all = [...m.positions, ...s.positions].sort((a, b) => b.pnl_pct - a.pnl_pct);
+  document.getElementById('ov-pos-tbody').innerHTML =
+    all.length ? all.map(posRow).join('') : '<tr><td colspan="8" class="empty">Aucune position ouverte</td></tr>';
+}
+
+// ── Positions ─────────────────────────────────────────────────
+function renderPositions() {
+  if (!apiData) return;
+  const all = [...apiData.meme.positions, ...apiData.solana.positions].sort((a, b) => b.pnl_pct - a.pnl_pct);
+  document.getElementById('pos-count').textContent = `${all.length} position${all.length !== 1 ? 's' : ''}`;
+  document.getElementById('pos-tbody').innerHTML =
+    all.length ? all.map(posRow).join('') : '<tr><td colspan="8" class="empty">Aucune position ouverte</td></tr>';
+}
+
+// ── History ───────────────────────────────────────────────────
+function renderHistory() {
+  if (!apiData) return;
+  const hist = apiData.meme.history || [], m = apiData.meme;
+  document.getElementById('hist-summary').textContent =
+    m.trades_total > 0 ? `${m.trades_total} trades · ${m.wins}W / ${m.losses}L · WR ${m.win_rate}%` : 'Aucun trade';
+  document.getElementById('hist-tbody').innerHTML = !hist.length
+    ? '<tr><td colspan="5" class="empty">Aucun trade fermé enregistré</td></tr>'
+    : hist.map((t, i) => {
+        const pnl = parseFloat(t.pnl || 0), reason = (t.reason || '?').toUpperCase();
+        return `<tr>
+          <td style="color:var(--text-muted)">${hist.length - i}</td>
+          <td class="tok" onclick="openTokenChart('')" style="cursor:default">${esc(t.symbol || '?')}</td>
+          <td><span class="reason ${reason}">${reason}</span></td>
+          <td class="${pnlClass(pnl)}">${fmtPnl(pnl)}</td>
+          <td>${fmtDate(t.ts)}</td>
+        </tr>`;
+      }).join('');
+}
+
+// ── Solana status (overview) ──────────────────────────────────
+async function fetchSolanaStatus() {
+  try {
+    const res = await fetch('/api/solana/status');
+    if (!res.ok) return;
+    solanaStatus = await res.json();
+    renderSolanaOverview();
+  } catch (e) { console.error(e); }
+}
+
+function renderSolanaOverview() {
+  if (!solanaStatus) return;
+  const s = solanaStatus;
+  const balEl = document.getElementById('ov-sbalance');
+  balEl.textContent = s.paper_balance.toFixed(2) + ' USDC';
+  balEl.className = 'stat-big ' + (s.paper_balance >= 200 ? 'pos' : s.paper_balance < 150 ? 'neg' : '');
+  const pnlEl = document.getElementById('ov-spnl-total');
+  pnlEl.textContent = fmtPnl(s.pnl_total);
+  pnlEl.className = 'val ' + pnlClass(s.pnl_total);
+  document.getElementById('ov-strades').textContent = s.trades_count;
+}
+
+// ── Solana trade history ──────────────────────────────────────
+async function fetchSolanaHistory() {
+  try {
+    const res = await fetch('/api/solana/trades');
+    if (!res.ok) return;
+    solanaHistory = await res.json();
+    renderSolanaHistory();
+  } catch (e) { console.error(e); }
+}
+
+function renderSolanaHistory() {
+  const countEl = document.getElementById('shist-count');
+  const tbody   = document.getElementById('shist-tbody');
+  if (!solanaHistory.length) {
+    countEl.textContent = '0 trade';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">Aucun trade fermé pour l\'instant</td></tr>';
+    return;
+  }
+  const wins = solanaHistory.filter(t => (t.pnl || 0) > 0).length;
+  const wr   = Math.round(wins / solanaHistory.length * 100);
+  countEl.textContent = `${solanaHistory.length} trades · ${wins}W / ${solanaHistory.length - wins}L · WR ${wr}%`;
+  tbody.innerHTML = solanaHistory.map(t => {
+    const reason = (t.reason || '?').toUpperCase();
+    const pnl    = parseFloat(t.pnl || 0);
+    const pnlPct = parseFloat(t.pnl_pct || 0);
+    return `<tr>
+      <td class="tok" style="cursor:default">${esc(t.symbol || '?')}</td>
+      <td><span class="reason ${reason}">${reason}</span></td>
+      <td>${(t.amount_usdc || 0).toFixed(2)} USDC</td>
+      <td>${fmtPrice(t.entry_price)}</td>
+      <td>${fmtPrice(t.exit_price)}</td>
+      <td class="${pnlClass(pnlPct)}">${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%</td>
+      <td class="${pnlClass(pnl)}">${fmtPnl(pnl)}</td>
+      <td>${fmtDate(t.opened_at)}</td>
+      <td>${fmtDate(t.closed_at)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Balance chart (with zoom/pan) ────────────────────────────
+let _balanceData = [];
+
+async function fetchBalanceHistory() {
+  try {
+    const res = await fetch('/api/balance_history');
+    if (!res.ok) return;
+    _balanceData = await res.json();
+    renderBalanceChart(_balanceData);
+  } catch (e) { console.error(e); }
+}
+
+function renderBalanceChart(data) {
+  const ctx = document.getElementById('balance-chart').getContext('2d');
+  if (balChart) balChart.destroy();
+
+  if (!data.length) {
+    ctx.fillStyle = '#64748b';
+    ctx.font = '14px Segoe UI';
+    ctx.textAlign = 'center';
+    ctx.fillText('Pas encore de données de solde dans les logs', ctx.canvas.width / 2, 190);
+    return;
+  }
+
+  const labels = data.map(d => d.ts.substring(5, 16));
+  const values = data.map(d => d.balance);
+  const sparse = data.length > 80;
+
+  balChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Solde USDC',
+          data: values,
+          borderColor: '#7c3aed',
+          backgroundColor: 'rgba(124,58,237,0.07)',
+          borderWidth: 2,
+          // TODO: colour buy/sell events when API returns d.event field
+          pointRadius: data.map(d => d.event ? 5 : (sparse ? 0 : 2)),
+          pointBackgroundColor: data.map(d => d.event === 'buy' ? '#10b981' : d.event === 'sell' ? '#ef4444' : '#7c3aed'),
+          pointHoverRadius: 5,
+          fill: true,
+          tension: 0.3,
+        },
+        {
+          label: 'Départ 200 USDC',
+          data: values.map(() => 200),
+          borderColor: 'rgba(100,116,139,0.35)',
+          borderWidth: 1,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 300 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8', font: { size: 12 }, boxWidth: 16 } },
+        tooltip: {
+          backgroundColor: '#12121a',
+          borderColor: '#2d2d3f',
+          borderWidth: 1,
+          titleColor: '#e2e8f0',
+          bodyColor: '#94a3b8',
+          callbacks: {
+            title: ctx => {
+              const ts = data[ctx[0].dataIndex]?.ts;
+              if (!ts) return ctx[0].label;
+              try {
+                const d = new Date(ts.replace(' ', 'T'));
+                return d.toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' })
+                  + ' ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+              } catch { return ts; }
+            },
+            label: ctx => `Solde : ${ctx.parsed.y.toFixed(2)} USDC`,
+            afterLabel: ctx => {
+              const delta = ctx.parsed.y - 200;
+              return `Depuis départ : ${delta > 0 ? '+' : ''}${delta.toFixed(2)} USDC`;
+            },
+          },
+        },
+        zoom: {
+          zoom: {
+            wheel: { enabled: true, speed: 0.08 },
+            pinch: { enabled: true },
+            mode: 'x',
+          },
+          pan: {
+            enabled: true,
+            mode: 'x',
+          },
+          limits: {
+            x: { min: 'original', max: 'original' },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#475569', maxTicksLimit: 12, font: { size: 11 } },
+          grid: { color: 'rgba(45,45,63,0.5)' },
+        },
+        y: {
+          ticks: { color: '#475569', callback: v => v + ' $', font: { size: 11 } },
+          grid: { color: 'rgba(45,45,63,0.5)' },
+        },
+      },
+    },
+  });
+
+  // Double-click to reset zoom
+  document.getElementById('balance-chart').ondblclick = () => balChart && balChart.resetZoom();
+
+  const balCanvas = document.getElementById('balance-chart');
+  balCanvas.addEventListener('mousemove', e => {
+    const rect = balCanvas.getBoundingClientRect();
+    balChart._crosshairX = e.clientX - rect.left;
+    balChart._crosshairY = e.clientY - rect.top;
+    balChart.draw();
+  });
+  balCanvas.addEventListener('mouseleave', () => {
+    balChart._crosshairX = null;
+    balChart.draw();
+  });
+}
+
+// ── Token chart modal ─────────────────────────────────────────
+function openTokenChart(mint) {
+  const pos = positionsMap[mint];
+  if (!mint || !pos) return;
+
+  // Show modal in loading state
+  document.getElementById('token-modal').classList.add('open');
+  document.getElementById('modal-symbol').textContent = pos.symbol;
+  const srcBadge = document.getElementById('modal-source-badge');
+  srcBadge.style.display = 'none';
+  document.getElementById('modal-chart-area').innerHTML =
+    '<div class="modal-loading"><span class="spinner"></span>Chargement du graphique…</div>';
+  document.getElementById('modal-meta').style.display = 'none';
+
+  // Fill meta (available immediately)
+  const entry = pos.entry_price;
+  const tp1 = entry * 1.15, tp2 = entry * 1.30, sl = entry * 0.92;
+  document.getElementById('mm-entry').textContent = fmtPrice(entry);
+  document.getElementById('mm-tp1').textContent   = fmtPrice(tp1) + ' (+15%)';
+  document.getElementById('mm-tp2').textContent   = fmtPrice(tp2) + ' (+30%)';
+  document.getElementById('mm-sl').textContent    = fmtPrice(sl)  + ' (-8%)';
+  document.getElementById('mm-date').textContent  = fmtDate(pos.open_ts);
+  const pnlEl = document.getElementById('mm-pnl');
+  pnlEl.textContent = pos.current_price > 0 ? fmtPnl(pos.pnl_usdc) + ' (' + (pos.pnl_pct > 0 ? '+' : '') + pos.pnl_pct.toFixed(1) + '%)' : '—';
+  pnlEl.className = 'val ' + (pos.current_price > 0 ? pnlClass(pos.pnl_usdc) : 'neu');
+
+  fetch(`/api/token_chart/${mint}`)
+    .then(r => r.json())
+    .then(data => renderTokenChart(data, pos))
+    .catch(() => {
+      document.getElementById('modal-chart-area').innerHTML =
+        '<div class="empty">Impossible de charger les données de prix.</div>';
+    });
+}
+
+function renderTokenChart(data, pos) {
+  const points = data.points || [];
+
+  // Source badge
+  const srcBadge = document.getElementById('modal-source-badge');
+  if (data.source === 'geckoterminal') {
+    srcBadge.textContent = 'GeckoTerminal · 24h'; srcBadge.className = 'badge gt'; srcBadge.style.display = '';
+  } else if (data.source === 'dexscreener_approx') {
+    srcBadge.textContent = 'DexScreener · approx'; srcBadge.className = 'badge ds'; srcBadge.style.display = '';
+  } else {
+    srcBadge.style.display = 'none';
+  }
+
+  // Replace loading area with canvas
+  document.getElementById('modal-chart-area').innerHTML =
+    '<div class="modal-chart-wrap"><canvas id="token-chart"></canvas></div>';
+  document.getElementById('modal-meta').style.display = 'flex';
+
+  if (!points.length) {
+    document.getElementById('modal-chart-area').innerHTML =
+      '<div class="empty">Données de prix non disponibles.</div>';
+    return;
+  }
+
+  const ctx = document.getElementById('token-chart').getContext('2d');
+  if (tokenChart) tokenChart.destroy();
+
+  const labels = points.map(p => {
+    const d = new Date(p.ts);
+    return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  });
+  const prices  = points.map(p => p.price);
+  const entry   = pos.entry_price;
+  const tp1     = entry * 1.15;
+  const tp2ann  = entry * 1.30;
+  const sl      = entry * 0.92;
+  const entryTs = new Date(pos.open_ts.replace(' ', 'T')).getTime();
+
+  // Find the chart point closest to entry time
+  let entryIdx = -1, minDiff = Infinity;
+  points.forEach((p, i) => { const d = Math.abs(p.ts - entryTs); if (d < minDiff) { minDiff = d; entryIdx = i; } });
+  // Build annotations
+  const annotations = {};
+
+  if (entryIdx >= 0) {
+    const entryLabel = labels[entryIdx];
+    annotations.entryLine = {
+      type: 'line',
+      xMin: entryLabel, xMax: entryLabel,
+      borderColor: 'rgba(16,185,129,0.65)',
+      borderWidth: 1.5,
+      borderDash: [4, 4],
+      label: {
+        display: true, content: 'Entrée', position: 'start',
+        yAdjust: -8, color: '#10b981',
+        backgroundColor: 'rgba(10,10,20,0.85)',
+        font: { size: 10, weight: '600' },
+        padding: { x: 5, y: 3 },
+      },
+    };
+    annotations.entryPoint = {
+      type: 'point',
+      xValue: entryLabel, yValue: entry,
+      backgroundColor: '#10b981',
+      radius: 5,
+      borderColor: '#fff',
+      borderWidth: 1.5,
+    };
+  }
+
+  annotations.tp1Line = {
+    type: 'line', yMin: tp1, yMax: tp1,
+    borderColor: 'rgba(16,185,129,0.5)',
+    borderWidth: 1.5, borderDash: [6, 4],
+    label: {
+      display: true, content: `TP1  ${fmtPrice(tp1)}  +15%`,
+      position: 'end', color: '#10b981',
+      backgroundColor: 'rgba(10,10,20,0.85)',
+      font: { size: 10 }, padding: { x: 5, y: 3 },
+    },
+  };
+
+  annotations.slLine = {
+    type: 'line', yMin: sl, yMax: sl,
+    borderColor: 'rgba(239,68,68,0.5)',
+    borderWidth: 1.5, borderDash: [6, 4],
+    label: {
+      display: true, content: `SL  ${fmtPrice(sl)}  -8%`,
+      position: 'end', color: '#ef4444',
+      backgroundColor: 'rgba(10,10,20,0.85)',
+      font: { size: 10 }, padding: { x: 5, y: 3 },
+    },
+  };
+
+  tokenChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Prix USD',
+        data: prices,
+        borderColor: '#7c3aed',
+        backgroundColor: 'rgba(124,58,237,0.07)',
+        borderWidth: 2,
+        pointRadius: points.length <= 10 ? 3 : 0,
+        pointHoverRadius: 5,
+        fill: true,
+        tension: 0.3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 300 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#12121a',
+          borderColor: '#2d2d3f',
+          borderWidth: 1,
+          titleColor: '#e2e8f0',
+          bodyColor: '#94a3b8',
+          callbacks: {
+            title: ctx => {
+              const d = new Date(points[ctx[0].dataIndex].ts);
+              return d.toLocaleDateString('fr-FR') + ' ' +
+                     d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+            },
+            label: ctx => `Prix : ${fmtPrice(ctx.parsed.y)}`,
+            afterLabel: ctx => {
+              if (!entry) return [];
+              const price = ctx.parsed.y;
+              const pct      = ((price - entry) / entry * 100).toFixed(1);
+              const pctToTp1 = ((tp1 - price) / price * 100).toFixed(1);
+              const pctToSl  = ((sl  - price) / price * 100).toFixed(1);
+              return [
+                `vs entrée : ${pct >= 0 ? '+' : ''}${pct}%`,
+                `vers TP1  : ${pctToTp1 >= 0 ? '+' : ''}${pctToTp1}%`,
+                `vers SL   : ${pctToSl >= 0 ? '+' : ''}${pctToSl}%`,
+              ];
+            },
+          },
+        },
+        annotation: { annotations },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#475569', maxTicksLimit: 8, font: { size: 11 } },
+          grid: { color: 'rgba(45,45,63,0.5)' },
+        },
+        y: {
+          ticks: { color: '#475569', callback: v => fmtPrice(v), font: { size: 11 } },
+          grid: { color: 'rgba(45,45,63,0.5)' },
+        },
+      },
+    },
+  });
+
+  const canvasEl = document.getElementById('token-chart');
+  canvasEl.addEventListener('mousemove', e => {
+    const rect = canvasEl.getBoundingClientRect();
+    tokenChart._crosshairX = e.clientX - rect.left;
+    tokenChart._crosshairY = e.clientY - rect.top;
+    tokenChart.draw();
+  });
+  canvasEl.addEventListener('mouseleave', () => {
+    tokenChart._crosshairX = null;
+    tokenChart.draw();
+  });
+}
+
+function closeTokenModal() {
+  document.getElementById('token-modal').classList.remove('open');
+  if (tokenChart) { tokenChart.destroy(); tokenChart = null; }
+}
+
+function modalOverlayClick(e) {
+  if (e.target === e.currentTarget) closeTokenModal();
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeTokenModal(); });
+
+// ── Logs ──────────────────────────────────────────────────────
+async function fetchLogs() {
+  const [mr, sr] = await Promise.all([
+    fetch('/api/logs/meme').catch(() => null),
+    fetch('/api/logs/solana').catch(() => null),
+  ]);
+  if (mr?.ok)   memeLogs   = await mr.json();
+  if (sr?.ok)   solanaLogs = await sr.json();
+  applyFilter('meme');
+  applyFilter('solana');
+}
+
+function applyFilter(bot) {
+  const fq    = document.getElementById(bot + '-filter').value.toUpperCase();
+  const lines = bot === 'meme' ? memeLogs : solanaLogs;
+  const el    = document.getElementById(bot + '-log');
+  const vis   = fq ? lines.filter(l => l.toUpperCase().includes(fq)) : lines;
+  el.innerHTML = vis.map(line => {
+    const u = line.toUpperCase();
+    let cls = 'def';
+    if (u.includes('ERROR') || u.includes('CRITICAL'))       cls = 'err';
+    else if (u.includes('WARNING') || u.includes('BLOQUÉ'))  cls = 'warn';
+    else if (u.includes('BUY') || u.includes('ACHAT'))       cls = 'buy';
+    else if (u.includes('SELL') || u.includes('TP') || u.includes(' SL ') || u.includes('TRAILING')) cls = 'sell';
+    return `<div class="ll ${cls}">${esc(line)}</div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Auto-refresh countdown ────────────────────────────────────
+function tick() {
+  countdown--;
+  document.getElementById('hd-countdown').textContent = 'Refresh ' + countdown + 's';
+  if (countdown <= 0) {
+    countdown = REFRESH_SEC;
+    fetchData();
+    if (currentTab === 'logs')    fetchLogs();
+    if (currentTab === 'balance') fetchBalanceHistory();
+    if (currentTab === 'history') fetchSolanaHistory();
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────
+(async function init() {
+  await fetchData();
+  await fetchBalanceHistory();
+  await fetchSolanaStatus();
+  setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>

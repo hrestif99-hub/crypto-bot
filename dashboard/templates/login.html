@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crypto Dashboard — Connexion</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0a0a0f;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    .card {
+      background: #12121a;
+      border: 1px solid #2d2d3f;
+      border-radius: 12px;
+      padding: 36px 32px;
+      width: 100%;
+      max-width: 360px;
+    }
+    .logo { font-size: 28px; margin-bottom: 8px; }
+    h1 { font-size: 20px; font-weight: 700; color: #e2e8f0; margin-bottom: 4px; }
+    .subtitle { font-size: 13px; color: #64748b; margin-bottom: 28px; }
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    input[type="password"] {
+      width: 100%;
+      background: #07070d;
+      border: 1px solid #2d2d3f;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 14px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      transition: border-color 0.15s;
+    }
+    input[type="password"]:focus { outline: none; border-color: #7c3aed; }
+    button {
+      width: 100%;
+      background: #7c3aed;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 10px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover { background: #6d28d9; }
+    .error {
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #fca5a5;
+      font-size: 13px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      margin-bottom: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">⬡</div>
+    <h1>Crypto Dashboard</h1>
+    <div class="subtitle">Monitoring meme_scalper &amp; solana_bot</div>
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="POST">
+      <label>Mot de passe</label>
+      <input type="password" name="password" autofocus placeholder="••••••••">
+      <button type="submit">Connexion</button>
+    </form>
+  </div>
+</body>
+</html>
