@@ -70,8 +70,33 @@ def entry_signal(window: list, cfg) -> bool:
     return True
 
 
-def run(symbol: str, candles: list, cfg) -> dict:
-    """Backtest single-symbol, une position à la fois. Retourne les métriques."""
+def precompute_signals(candles: list) -> list:
+    """Pré-calcule (roc, relvol, vwap, vol24) par bougie — INDÉPENDANT des params.
+    Utilise les mêmes fonctions que le bot live (common) → zéro divergence.
+    Calculé une seule fois par token, réutilisé par toutes les configs testées."""
+    sigs = [None] * len(candles)
+    for i in range(WARMUP, len(candles)):
+        w = candles[max(0, i - 287):i + 1]
+        sigs[i] = (roc_15m(w), rel_volume(w), vwap(w), sum(c[5] * c[4] for c in w))
+    return sigs
+
+
+def _entry_ok(sig, close, cfg) -> bool:
+    """Applique les SEUILS (qui dépendent des params) aux signaux pré-calculés."""
+    roc, relvol, vw, vol24 = sig
+    if vol24 < cfg.MIN_VOL24_USD:           return False
+    if roc < cfg.ENTRY_ROC_15M:             return False
+    if relvol < cfg.ENTRY_REL_VOL:          return False
+    if vw > 0 and close < vw * cfg.ENTRY_VWAP_TOL: return False
+    return True
+
+
+def run(symbol: str, candles: list, cfg, signals=None, start=None, end=None) -> dict:
+    """Backtest single-symbol, une position à la fois. Retourne les métriques.
+    signals : cache de precompute_signals (sinon recalculé à la volée).
+    start/end : bornes d'indices (pour découper IN-sample / OUT-of-sample)."""
+    start = WARMUP if start is None else max(start, WARMUP)
+    end   = len(candles) if end is None else end
     pos = None              # {entry, qty, cost, peak, tp1, tp2, entry_i}
     cooldown_until = -1
     trades = []             # un trade = une entrée→clôture (PnL agrégé)
@@ -87,7 +112,7 @@ def run(symbol: str, candles: list, cfg) -> dict:
     def fill_sell(price):
         return price * (1 - SELL_COST_PCT / 100)
 
-    for i in range(WARMUP, len(candles)):
+    for i in range(start, end):
         o, h, l, cl = candles[i][1], candles[i][2], candles[i][3], candles[i][4]
 
         # ── Gestion de la position ouverte (intra-bougie pessimiste) ──
@@ -131,7 +156,10 @@ def run(symbol: str, candles: list, cfg) -> dict:
                 max_dd = min(max_dd, realized - peak_equity)
 
         # ── Entrée ──
-        elif i > cooldown_until and entry_signal(candles[max(0, i - 287):i + 1], cfg):
+        elif i > cooldown_until and (
+            _entry_ok(signals[i], cl, cfg) if signals is not None and signals[i]
+            else (signals is None and entry_signal(candles[max(0, i - 287):i + 1], cfg))
+        ):
             entry_px = fill_buy(cl)
             qty = cfg.TRADE_USDC / entry_px
             pos = {"entry": cl, "qty": qty, "cost": cfg.TRADE_USDC,
@@ -152,7 +180,7 @@ def run(symbol: str, candles: list, cfg) -> dict:
         "avg_trade":  (realized / n) if n else 0,
         "profit_factor": (gross_w / gross_l) if gross_l > 0 else float("inf"),
         "max_dd":     max_dd,
-        "exposure":   candles_in_market / (len(candles) - WARMUP) * 100,
+        "exposure":   candles_in_market / max(1, end - start) * 100,
         "by_reason":  _count_reasons(trades),
     }
 
