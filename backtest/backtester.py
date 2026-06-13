@@ -82,7 +82,8 @@ def precompute_signals(candles: list) -> list:
 
 
 def _entry_ok(sig, close, cfg) -> bool:
-    """Applique les SEUILS (qui dépendent des params) aux signaux pré-calculés."""
+    """Entrée MOMENTUM (stratégie historique) : on achète la force.
+    Applique les SEUILS (qui dépendent des params) aux signaux pré-calculés."""
     roc, relvol, vw, vol24 = sig
     if vol24 < cfg.MIN_VOL24_USD:           return False
     if roc < cfg.ENTRY_ROC_15M:             return False
@@ -91,12 +92,25 @@ def _entry_ok(sig, close, cfg) -> bool:
     return True
 
 
-def run(symbol: str, candles: list, cfg, signals=None, start=None, end=None) -> dict:
+def _entry_meanrev(sig, close, cfg) -> bool:
+    """Entrée MEAN-REVERSION : on achète la faiblesse (pari sur un rebond).
+    Conditions : liquidité OK, prix nettement SOUS le VWAP, et chute récente."""
+    roc, relvol, vw, vol24 = sig
+    if vol24 < cfg.MIN_VOL24_USD:                       return False
+    if vw <= 0:                                         return False
+    if close > vw * (1 - cfg.MR_DIP_PCT / 100):         return False   # prix >= X% sous VWAP
+    if roc > -cfg.MR_ROC_DROP:                          return False   # vient de chuter
+    return True
+
+
+def run(symbol: str, candles: list, cfg, signals=None, start=None, end=None, entry_fn=None) -> dict:
     """Backtest single-symbol, une position à la fois. Retourne les métriques.
     signals : cache de precompute_signals (sinon recalculé à la volée).
-    start/end : bornes d'indices (pour découper IN-sample / OUT-of-sample)."""
+    start/end : bornes d'indices (pour découper IN-sample / OUT-of-sample).
+    entry_fn : fonction d'entrée (défaut _entry_ok momentum ; _entry_meanrev pour le dip)."""
     start = WARMUP if start is None else max(start, WARMUP)
     end   = len(candles) if end is None else end
+    ef    = entry_fn or _entry_ok
     pos = None              # {entry, qty, cost, peak, tp1, tp2, entry_i}
     cooldown_until = -1
     trades = []             # un trade = une entrée→clôture (PnL agrégé)
@@ -157,7 +171,7 @@ def run(symbol: str, candles: list, cfg, signals=None, start=None, end=None) -> 
 
         # ── Entrée ──
         elif i > cooldown_until and (
-            _entry_ok(signals[i], cl, cfg) if signals is not None and signals[i]
+            ef(signals[i], cl, cfg) if signals is not None and signals[i]
             else (signals is None and entry_signal(candles[max(0, i - 287):i + 1], cfg))
         ):
             entry_px = fill_buy(cl)
