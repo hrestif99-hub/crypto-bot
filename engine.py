@@ -65,12 +65,42 @@ def _record(paper_state: dict, trades_file: str, *, symbol, mint, reason,
     })
 
 
+def decide_exit(entry, peak, current, age_min, tp1_done, tp2_done, cfg):
+    """
+    DÉCISION DE SORTIE PURE — sans I/O, sans horloge.
+    Partagée à l'identique par le bot live (manage_position) et le backtest.
+
+    Retourne (reason, sell_fraction, closes) ou None :
+      • reason         : "STALL_EXIT" | "TP1" | "TP2" | "TRAILING" | "SL"
+      • sell_fraction  : part de la QUANTITÉ COURANTE à vendre (1.0 = tout)
+      • closes         : True si la position est entièrement fermée
+    L'ordre de priorité est : stall → TP1 → TP2 → trailing → SL.
+    """
+    if entry <= 0:
+        return None
+    pct_e     = (current - entry) / entry * 100
+    pct_p     = (current - peak) / peak * 100 if peak > 0 else 0
+    peak_gain = (peak - entry) / entry * 100
+
+    if age_min >= cfg.STALL_MINUTES and abs(pct_e) < cfg.STALL_BAND_PCT:
+        return ("STALL_EXIT", 1.0, True)
+    if not tp1_done and pct_e >= cfg.TP1_PCT:
+        return ("TP1", cfg.TP1_SELL, False)
+    if tp1_done and not tp2_done and pct_e >= cfg.TP2_PCT:
+        return ("TP2", cfg.TP2_SELL, False)
+    if peak_gain >= cfg.TRAIL_ARM_PCT and pct_p <= -cfg.TRAIL_GIVEBACK_PCT:
+        return ("TRAILING", 1.0, True)
+    if pct_e <= cfg.SL_PCT:
+        return ("SL", 1.0, True)
+    return None
+
+
 async def manage_position(session, mint, positions, cfg, paper_state, risk, logger,
                           bot_label, trades_file, set_cooldown, save_positions):
     """
-    Gère UNE position selon le profil `cfg` (C.Meme ou C.Solana).
-    set_cooldown(symbol, mint, reason) : callback de cooldown propre au bot.
-    save_positions() : callback de persistance propre au bot.
+    Gère UNE position live selon le profil `cfg` (C.Meme ou C.Solana).
+    Toute la logique de décision vit dans decide_exit() ; ici on ne fait
+    que l'I/O (prix, vente, persistance, cooldown, notification).
     """
     pos = positions.get(mint)
     if not pos:
@@ -88,99 +118,59 @@ async def manage_position(session, mint, positions, cfg, paper_state, risk, logg
         pos["peak_price"] = current
         save_positions()
     peak = pos.get("peak_price", entry)
+    qty  = pos["qty_raw"]
+    age  = _age_minutes(open_ts)
 
-    pct_e = (current - entry) / entry * 100 if entry > 0 else 0   # vs entrée
-    pct_p = (current - peak) / peak * 100 if peak > 0 else 0      # vs pic
-    qty   = pos["qty_raw"]
-
-    async def do_sell(sell_qty):
-        return await sell(session, mint, sell_qty, pos, paper_state, logger, current_hint=current)
-
-    # ─── STALL EXIT ──────────────────────────────────────────────────
-    age = _age_minutes(open_ts)
-    if age >= cfg.STALL_MINUTES and abs(pct_e) < cfg.STALL_BAND_PCT:
-        ok, _, usdc = await do_sell(qty)
-        if ok:
-            pnl = usdc - pos["amount_usdc"]
-            risk.register(pnl)
-            _record(paper_state, trades_file, symbol=symbol, mint=mint, reason="STALL_EXIT",
-                    entry=entry, current=current, amount=pos["amount_usdc"], pnl=pnl,
-                    open_ts=open_ts, closed=True)
-            set_cooldown(symbol, mint, "stall")
-            del positions[mint]
-            save_positions()
-            await send_tg(f"{bot_label} — STALL EXIT\nToken : {symbol}\n"
-                          f"Âge   : {age:.0f}min sans momentum\nPnL   : {pnl:+.2f} USDC")
+    decision = decide_exit(entry, peak, current, age,
+                           pos.get("tp1_done"), pos.get("tp2_done"), cfg)
+    if not decision:
+        return
+    reason, frac, closes = decision
+    sell_qty = int(qty * frac)
+    if sell_qty <= 0:
         return
 
-    # ─── TP1 ─────────────────────────────────────────────────────────
-    if not pos.get("tp1_done") and pct_e >= cfg.TP1_PCT:
-        sell_qty = int(qty * cfg.TP1_SELL)
-        if sell_qty > 0:
-            ok, _, usdc = await do_sell(sell_qty)
-            if ok:
-                gain = usdc - pos["amount_usdc"] * cfg.TP1_SELL
-                pos["tp1_done"]     = True
-                pos["qty_raw"]     -= sell_qty
-                pos["amount_usdc"] *= (1 - cfg.TP1_SELL)
-                pos["peak_price"]   = current
-                risk.register_gain(gain)
-                _record(paper_state, trades_file, symbol=symbol, mint=mint, reason="TP1",
-                        entry=entry, current=current, amount=usdc, pnl=gain,
-                        open_ts=open_ts, closed=False)
-                save_positions()
-                await send_tg(f"{bot_label} — TP1 +{cfg.TP1_PCT:.0f}%\nToken : {symbol}\n"
-                              f"Vendu {cfg.TP1_SELL*100:.0f}% | Gain {gain:+.2f} USDC")
+    ok, _, usdc = await sell(session, mint, sell_qty, pos, paper_state, logger, current_hint=current)
+    if not ok:
         return
 
-    # ─── TP2 ─────────────────────────────────────────────────────────
-    if pos.get("tp1_done") and not pos.get("tp2_done") and pct_e >= cfg.TP2_PCT:
-        sell_qty = int(qty * cfg.TP2_SELL)
-        if sell_qty > 0:
-            ok, _, usdc = await do_sell(sell_qty)
-            if ok:
-                gain = usdc - pos["amount_usdc"] * cfg.TP2_SELL
-                pos["tp2_done"]     = True
-                pos["qty_raw"]     -= sell_qty
-                pos["amount_usdc"] *= (1 - cfg.TP2_SELL)
-                risk.register_gain(gain)
-                _record(paper_state, trades_file, symbol=symbol, mint=mint, reason="TP2",
-                        entry=entry, current=current, amount=usdc, pnl=gain,
-                        open_ts=open_ts, closed=False)
-                save_positions()
-                await send_tg(f"{bot_label} — TP2 +{cfg.TP2_PCT:.0f}%\nToken : {symbol}\n"
-                              f"Vendu {cfg.TP2_SELL*100:.0f}% du reste | Gain {gain:+.2f} USDC")
+    if not closes:
+        # ─── Prise de profit partielle (TP1 / TP2) ───
+        gain = usdc - pos["amount_usdc"] * frac
+        pos["tp1_done" if reason == "TP1" else "tp2_done"] = True
+        pos["qty_raw"]     -= sell_qty
+        pos["amount_usdc"] *= (1 - frac)
+        if reason == "TP1":
+            pos["peak_price"] = current      # on repart du nouveau prix pour le trailing
+        risk.register_gain(gain)
+        _record(paper_state, trades_file, symbol=symbol, mint=mint, reason=reason,
+                entry=entry, current=current, amount=usdc, pnl=gain,
+                open_ts=open_ts, closed=False)
+        save_positions()
+        pct = cfg.TP1_PCT if reason == "TP1" else cfg.TP2_PCT
+        suffix = "" if reason == "TP1" else " du reste"
+        await send_tg(f"{bot_label} — {reason} +{pct:.0f}%\nToken : {symbol}\n"
+                      f"Vendu {frac*100:.0f}%{suffix} | Gain {gain:+.2f} USDC")
         return
 
-    # ─── TRAILING STOP ───────────────────────────────────────────────
-    peak_gain = (peak - entry) / entry * 100 if entry > 0 else 0
-    if peak_gain >= cfg.TRAIL_ARM_PCT and pct_p <= -cfg.TRAIL_GIVEBACK_PCT:
-        ok, _, usdc = await do_sell(qty)
-        if ok:
-            pnl = usdc - pos["amount_usdc"]
-            risk.register(pnl)
-            _record(paper_state, trades_file, symbol=symbol, mint=mint, reason="TRAILING",
-                    entry=entry, current=current, amount=pos["amount_usdc"], pnl=pnl,
-                    open_ts=open_ts, closed=True)
-            set_cooldown(symbol, mint, "trailing")
-            del positions[mint]
-            save_positions()
-            await send_tg(f"{bot_label} — TRAILING\nToken : {symbol}\n"
-                          f"Pic +{peak_gain:.1f}% | Recul {pct_p:.1f}%\nPnL {pnl:+.2f} USDC")
-        return
+    # ─── Clôture totale (STALL / TRAILING / SL) ───
+    pnl = usdc - pos["amount_usdc"]
+    risk.register(pnl)
+    _record(paper_state, trades_file, symbol=symbol, mint=mint, reason=reason,
+            entry=entry, current=current, amount=pos["amount_usdc"], pnl=pnl,
+            open_ts=open_ts, closed=True)
+    set_cooldown(symbol, mint, "sl" if reason == "SL" else reason.lower())
+    del positions[mint]
+    save_positions()
 
-    # ─── STOP LOSS ───────────────────────────────────────────────────
-    if pct_e <= cfg.SL_PCT:
-        ok, _, usdc = await do_sell(qty)
-        if ok:
-            pnl = usdc - pos["amount_usdc"]
-            risk.register(pnl)
-            _record(paper_state, trades_file, symbol=symbol, mint=mint, reason="SL",
-                    entry=entry, current=current, amount=pos["amount_usdc"], pnl=pnl,
-                    open_ts=open_ts, closed=True)
-            set_cooldown(symbol, mint, "sl")
-            del positions[mint]
-            save_positions()
-            await send_tg(f"{bot_label} — STOP LOSS {cfg.SL_PCT:.0f}%\nToken : {symbol}\n"
-                          f"Prix ${current:.6f}\nPnL {pnl:+.2f} USDC")
-        return
+    if reason == "STALL_EXIT":
+        await send_tg(f"{bot_label} — STALL EXIT\nToken : {symbol}\n"
+                      f"Âge   : {age:.0f}min sans momentum\nPnL   : {pnl:+.2f} USDC")
+    elif reason == "TRAILING":
+        peak_gain = (peak - entry) / entry * 100
+        pct_p     = (current - peak) / peak * 100 if peak > 0 else 0
+        await send_tg(f"{bot_label} — TRAILING\nToken : {symbol}\n"
+                      f"Pic +{peak_gain:.1f}% | Recul {pct_p:.1f}%\nPnL {pnl:+.2f} USDC")
+    else:  # SL
+        await send_tg(f"{bot_label} — STOP LOSS {cfg.SL_PCT:.0f}%\nToken : {symbol}\n"
+                      f"Prix ${current:.6f}\nPnL {pnl:+.2f} USDC")
