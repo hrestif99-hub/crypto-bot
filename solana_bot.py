@@ -186,7 +186,7 @@ async def process_token(session, mint, symbol, age_s):
         return
     if liq < CFG.MIN_LIQUIDITY_USD:
         return
-    if vol5 < CFG.MIN_VOL_5M and ph1 < 10.0:
+    if vol5 < CFG.MIN_VOL_5M and ph1 < CFG.VOL5_OVERRIDE_PH1:
         return
 
     if not await rugcheck_safe(session, mint):
@@ -231,17 +231,13 @@ async def scanner_loop():
     while True:
         if risk.daily_limit_hit():
             logger.warning(f"[KILL-SWITCH] perte journalière {risk.daily_pnl:.2f} — pause 1h")
-            await send_tg(f"🛑 {BOT} KILL-SWITCH\nPerte {risk.daily_pnl:.2f} USDC — pause 1h")
-            await asyncio.sleep(3600)
+            await send_tg(f"🛑 {BOT} KILL-SWITCH\nPerte {risk.daily_pnl:.2f} USDC — pause")
+            await asyncio.sleep(C.Risk.DAILY_PAUSE_SECONDS)
         try:
             async with aiohttp.ClientSession() as s:
+                pump, dex = await asyncio.gather(fetch_pumpfun(s), fetch_dexscreener(s))
                 seen = set()
-                for tok in await fetch_pumpfun(s):
-                    if tok["mint"] not in seen:
-                        seen.add(tok["mint"])
-                        await process_token(s, tok["mint"], tok["symbol"], tok["age_s"])
-                        await asyncio.sleep(0.5)
-                for tok in await fetch_dexscreener(s):
+                for tok in pump + dex:
                     if tok["mint"] not in seen:
                         seen.add(tok["mint"])
                         await process_token(s, tok["mint"], tok["symbol"], tok["age_s"])

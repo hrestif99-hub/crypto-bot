@@ -39,6 +39,7 @@ USDC_MINT     = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDC_DECIMALS = 6
 JUPITER_BASE  = "https://lite-api.jup.ag/swap/v1"
 SLIPPAGE_BPS  = 1500
+SELL_SLIPPAGE_LADDER = [SLIPPAGE_BPS, 3000, 5000, 9900]  # escalade si la vente échoue
 JITO_TIP_LAMPORTS = int(os.environ.get("JITO_TIP_LAMPORTS", "100000"))
 MIN_SOL_FOR_RENT  = 0.005
 
@@ -90,6 +91,7 @@ class Meme:
     MIN_VOL24_USD   = 150_000  # écarte les tokens morts ; le vrai filtre est le momentum
     ENTRY_ROC_15M   = 2.0      # momentum 15 min ≥ +2 %
     ENTRY_REL_VOL   = 1.3      # volume ≥ 1.3× la moyenne récente
+    ENTRY_VWAP_TOL  = 0.98     # tolérance sous le VWAP (rejet si prix < VWAP × 0.98)
 
     # Cooldowns
     COOLDOWN_HOURS    = 12
@@ -137,7 +139,7 @@ class Solana:
     MIN_VOL_5M         = 1_000
     MIN_AGE_SECONDS    = 120     # > 2 min : éviter le snipe instantané
     MIN_SCORE          = 60
-    MAX_TOP_HOLDER_PCT = 25.0    # rejet si un wallet détient > 25 %
+    VOL5_OVERRIDE_PH1  = 10.0    # vol5m faible toléré si priceChange 1h ≥ ce seuil
 
     # Cooldowns
     COOLDOWN_HOURS    = 24
@@ -150,7 +152,9 @@ class Solana:
 class Risk:
     MAX_CONSECUTIVE_LOSSES  = 3      # 3 pertes d'affilée → pause
     CIRCUIT_BREAKER_MINUTES = 90
-    DAILY_LOSS_LIMIT_USDC   = -8.0   # 4 % du bankroll → stop 24 h
+    DAILY_LOSS_LIMIT_USDC   = -8.0   # 4 % du bankroll → kill-switch
+    DAILY_PAUSE_SECONDS     = 3600   # durée de pause après kill-switch journalier
+    RUGCHECK_MAX_SCORE      = 800    # score RugCheck max toléré (au-dessus = rejet)
 
 
 # ─── Boucles (secondes) ──────────────────────────────────────────────

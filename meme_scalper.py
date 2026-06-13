@@ -18,7 +18,7 @@ import config as C
 from common import (
     send_tg, get_keypair, get_best_pair, get_ohlcv, rugcheck_safe,
     get_usdc_balance, buy, load_json, save_json, new_paper_state,
-    ensure_data_dir, RiskState, roc_15m, rel_volume, vwap, get_price,
+    ensure_data_dir, RiskState, roc_15m, rel_volume, vwap,
 )
 from engine import open_position, manage_position
 
@@ -104,7 +104,7 @@ async def check_entry(session, symbol, mint):
     if rv < CFG.ENTRY_REL_VOL:
         logger.info(f"[{symbol}] BLOQUÉ — VolRel {rv:.2f}x < {CFG.ENTRY_REL_VOL}x")
         return
-    if vw > 0 and price < vw * 0.98:
+    if vw > 0 and price < vw * CFG.ENTRY_VWAP_TOL:
         logger.info(f"[{symbol}] BLOQUÉ — prix ${price:.6f} sous VWAP ${vw:.6f}")
         return
 
@@ -137,8 +137,8 @@ async def scanner_loop():
     while True:
         if risk.daily_limit_hit():
             logger.warning(f"[KILL-SWITCH] perte journalière {risk.daily_pnl:.2f} — pause 1h")
-            await send_tg(f"🛑 {BOT} KILL-SWITCH\nPerte {risk.daily_pnl:.2f} USDC — pause 1h")
-            await asyncio.sleep(3600)
+            await send_tg(f"🛑 {BOT} KILL-SWITCH\nPerte {risk.daily_pnl:.2f} USDC — pause")
+            await asyncio.sleep(C.Risk.DAILY_PAUSE_SECONDS)
         try:
             async with aiohttp.ClientSession() as s:
                 for symbol, mint in CFG.TOKENS.items():

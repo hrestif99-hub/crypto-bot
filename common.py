@@ -199,7 +199,7 @@ async def rugcheck_safe(session: aiohttp.ClientSession, mint: str) -> bool:
         for risk in data.get("risks", []):
             if risk.get("level") == "critical":
                 return False
-        return data.get("score", 0) < 800
+        return data.get("score", 0) < C.Risk.RUGCHECK_MAX_SCORE
     except Exception:
         return True
 
@@ -367,15 +367,17 @@ async def buy(session, mint: str, amount_usdc: float, paper_state: dict, logger)
         return False, str(e), 0
 
 
-async def sell(session, mint: str, qty_raw: int, pos: dict, paper_state: dict, logger) -> tuple:
-    """Vente avec escalade de slippage. Retourne (ok, sig, usdc_reçu)."""
+async def sell(session, mint: str, qty_raw: int, pos: dict, paper_state: dict, logger,
+               current_hint: float | None = None) -> tuple:
+    """Vente avec escalade de slippage. Retourne (ok, sig, usdc_reçu).
+    current_hint : prix déjà connu par l'appelant, évite un re-fetch en paper mode."""
     if C.PAPER_MODE:
         quote = await _jup_quote(session, _quote_url(mint, C.USDC_MINT, qty_raw, C.SLIPPAGE_BPS))
         if isinstance(quote, dict) and "outAmount" in quote:
             usdc = int(quote["outAmount"]) / 10 ** C.USDC_DECIMALS
         else:
             entry   = pos.get("entry_price", 0)
-            current = await get_price(session, mint)
+            current = current_hint if current_hint else await get_price(session, mint)
             if entry <= 0 or current <= 0:
                 return False, "paper: données manquantes", 0.0
             total_qty = pos.get("qty_raw", qty_raw) or qty_raw
@@ -390,7 +392,7 @@ async def sell(session, mint: str, qty_raw: int, pos: dict, paper_state: dict, l
     if not kp or qty_raw <= 0:
         return False, "keypair/qty", 0.0
 
-    for i, slip in enumerate([C.SLIPPAGE_BPS, 3000, 5000, 9900]):
+    for i, slip in enumerate(C.SELL_SLIPPAGE_LADDER):
         if i > 0:
             await asyncio.sleep(2)
         quote = await _jup_quote(session, _quote_url(mint, C.USDC_MINT, qty_raw, slip))

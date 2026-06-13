@@ -94,7 +94,7 @@ async def manage_position(session, mint, positions, cfg, paper_state, risk, logg
     qty   = pos["qty_raw"]
 
     async def do_sell(sell_qty):
-        return await sell(session, mint, sell_qty, pos, paper_state, logger)
+        return await sell(session, mint, sell_qty, pos, paper_state, logger, current_hint=current)
 
     # ─── STALL EXIT ──────────────────────────────────────────────────
     age = _age_minutes(open_ts)

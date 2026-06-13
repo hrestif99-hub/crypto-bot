@@ -8,7 +8,6 @@ URL : http://<serveur>:8080  —  mot de passe : DASHBOARD_PASSWORD (.env)
 
 import os
 import sys
-import json
 import time
 from datetime import datetime, timedelta
 from functools import wraps
@@ -19,6 +18,7 @@ import requests
 # Import config depuis le dossier parent
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as C
+from common import load_json
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24).hex())
@@ -36,14 +36,6 @@ def require_auth(f):
             return redirect(url_for("login"))
         return f(*args, **kwargs)
     return decorated
-
-
-def read_json(path, default=None):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return default if default is not None else {}
 
 
 def read_tail(path, n=200):
@@ -140,10 +132,10 @@ def index():
 @app.route("/api/data")
 @require_auth
 def api_data():
-    meme_pos   = read_json(C.MEME_POSITIONS_FILE)
-    meme_state = read_json(C.MEME_STATE_FILE)
-    sol_pos    = read_json(C.SOL_POSITIONS_FILE)
-    sol_state  = read_json(C.SOL_STATE_FILE)
+    meme_pos   = load_json(C.MEME_POSITIONS_FILE, dict)
+    meme_state = load_json(C.MEME_STATE_FILE, dict)
+    sol_pos    = load_json(C.SOL_POSITIONS_FILE, dict)
+    sol_state  = load_json(C.SOL_STATE_FILE, dict)
 
     mints = [m for m in list(meme_pos.keys()) + list(sol_pos.keys()) if m]
     prices = fetch_prices(mints) if mints else {}
