@@ -87,7 +87,7 @@ class Meme:
     STALL_BAND_PCT  = 5.0      # stagne si |PnL| < 5 % après STALL_MINUTES
 
     # Filtres d'entrée
-    MIN_VOL24_USD   = 300_000  # activité réelle
+    MIN_VOL24_USD   = 150_000  # écarte les tokens morts ; le vrai filtre est le momentum
     ENTRY_ROC_15M   = 2.0      # momentum 15 min ≥ +2 %
     ENTRY_REL_VOL   = 1.3      # volume ≥ 1.3× la moyenne récente
 
