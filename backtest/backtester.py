@@ -70,37 +70,147 @@ def entry_signal(window: list, cfg) -> bool:
     return True
 
 
+# ─── Séries d'indicateurs (O(n), calculées une fois) ─────────────────
+def _ema_series(values, period):
+    out = [None] * len(values)
+    if len(values) < period:
+        return out
+    seed = sum(values[:period]) / period
+    out[period - 1] = seed
+    k = 2 / (period + 1)
+    prev = seed
+    for i in range(period, len(values)):
+        prev = values[i] * k + prev * (1 - k)
+        out[i] = prev
+    return out
+
+
+def _ema_of_series(series, period):
+    """EMA d'une série contenant des None en tête (pour le signal MACD)."""
+    out = [None] * len(series)
+    defined = [(i, v) for i, v in enumerate(series) if v is not None]
+    if len(defined) < period:
+        return out
+    seed = sum(v for _, v in defined[:period]) / period
+    out[defined[period - 1][0]] = seed
+    k = 2 / (period + 1)
+    prev = seed
+    for j in range(period, len(defined)):
+        i, v = defined[j]
+        prev = v * k + prev * (1 - k)
+        out[i] = prev
+    return out
+
+
+def _rsi_series(values, period=14):
+    out = [None] * len(values)
+    if len(values) < period + 1:
+        return out
+    g = sum(max(values[i] - values[i - 1], 0) for i in range(1, period + 1)) / period
+    l = sum(max(values[i - 1] - values[i], 0) for i in range(1, period + 1)) / period
+    out[period] = 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+    for i in range(period + 1, len(values)):
+        d = values[i] - values[i - 1]
+        g = (g * (period - 1) + max(d, 0)) / period
+        l = (l * (period - 1) + max(-d, 0)) / period
+        out[i] = 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+    return out
+
+
+def _sma_std_series(values, period=20):
+    sma = [None] * len(values)
+    std = [None] * len(values)
+    s = sq = 0.0
+    for i, v in enumerate(values):
+        s += v; sq += v * v
+        if i >= period:
+            ov = values[i - period]; s -= ov; sq -= ov * ov
+        if i >= period - 1:
+            m = s / period
+            sma[i] = m
+            std[i] = max(0.0, sq / period - m * m) ** 0.5
+    return sma, std
+
+
 def precompute_signals(candles: list) -> list:
-    """Pré-calcule (roc, relvol, vwap, vol24) par bougie — INDÉPENDANT des params.
-    Utilise les mêmes fonctions que le bot live (common) → zéro divergence.
-    Calculé une seule fois par token, réutilisé par toutes les configs testées."""
-    sigs = [None] * len(candles)
-    for i in range(WARMUP, len(candles)):
+    """Pré-calcule TOUS les indicateurs par bougie — INDÉPENDANT des params.
+    Renvoie un dict par bougie (None tant que pas assez d'historique).
+    Calculé une fois par token, réutilisé par toutes les configs testées."""
+    n = len(candles)
+    closes = [c[4] for c in candles]
+    ema12 = _ema_series(closes, 12)
+    ema26 = _ema_series(closes, 26)
+    macd  = [(ema12[i] - ema26[i]) if ema12[i] is not None and ema26[i] is not None else None
+             for i in range(n)]
+    macd_sig = _ema_of_series(macd, 9)
+    rsi = _rsi_series(closes, 14)
+    sma20, std20 = _sma_std_series(closes, 20)
+    emap = {p: _ema_series(closes, p) for p in (9, 21, 50, 200)}
+
+    sigs = [None] * n
+    for i in range(288, n):                 # 288 = warmup complet (vol24 sur 24h)
         w = candles[max(0, i - 287):i + 1]
-        sigs[i] = (roc_15m(w), rel_volume(w), vwap(w), sum(c[5] * c[4] for c in w))
+        sigs[i] = {
+            "close":  closes[i],
+            "roc":    roc_15m(w), "relvol": rel_volume(w), "vwap": vwap(w),
+            "vol24":  sum(c[5] * c[4] for c in w),
+            "rsi":    rsi[i],
+            "macd":   macd[i], "macd_sig": macd_sig[i],
+            "macd_prev": macd[i - 1], "sig_prev": macd_sig[i - 1],
+            "bb_mid": sma20[i], "bb_std": std20[i],
+            "ema":      {p: emap[p][i]     for p in emap},
+            "ema_prev": {p: emap[p][i - 1] for p in emap},
+        }
     return sigs
 
 
 def _entry_ok(sig, close, cfg) -> bool:
-    """Entrée MOMENTUM (stratégie historique) : on achète la force.
-    Applique les SEUILS (qui dépendent des params) aux signaux pré-calculés."""
-    roc, relvol, vw, vol24 = sig
-    if vol24 < cfg.MIN_VOL24_USD:           return False
-    if roc < cfg.ENTRY_ROC_15M:             return False
-    if relvol < cfg.ENTRY_REL_VOL:          return False
-    if vw > 0 and close < vw * cfg.ENTRY_VWAP_TOL: return False
+    """Entrée MOMENTUM (stratégie historique) : on achète la force."""
+    if sig["vol24"] < cfg.MIN_VOL24_USD:                       return False
+    if sig["roc"] < cfg.ENTRY_ROC_15M:                         return False
+    if sig["relvol"] < cfg.ENTRY_REL_VOL:                      return False
+    if sig["vwap"] > 0 and close < sig["vwap"] * cfg.ENTRY_VWAP_TOL: return False
     return True
 
 
 def _entry_meanrev(sig, close, cfg) -> bool:
-    """Entrée MEAN-REVERSION : on achète la faiblesse (pari sur un rebond).
-    Conditions : liquidité OK, prix nettement SOUS le VWAP, et chute récente."""
-    roc, relvol, vw, vol24 = sig
-    if vol24 < cfg.MIN_VOL24_USD:                       return False
-    if vw <= 0:                                         return False
-    if close > vw * (1 - cfg.MR_DIP_PCT / 100):         return False   # prix >= X% sous VWAP
-    if roc > -cfg.MR_ROC_DROP:                          return False   # vient de chuter
+    """MEAN-REVERSION : prix nettement sous le VWAP + chute récente."""
+    if sig["vol24"] < cfg.MIN_VOL24_USD:                  return False
+    if sig["vwap"] <= 0:                                  return False
+    if close > sig["vwap"] * (1 - cfg.MR_DIP_PCT / 100):  return False
+    if sig["roc"] > -cfg.MR_ROC_DROP:                     return False
     return True
+
+
+def _entry_rsi(sig, close, cfg) -> bool:
+    """RSI : achat en zone de survente (RSI < seuil)."""
+    if sig["vol24"] < cfg.MIN_VOL24_USD: return False
+    if sig["rsi"] is None:               return False
+    return sig["rsi"] < cfg.RSI_BUY
+
+
+def _entry_macd(sig, close, cfg) -> bool:
+    """MACD : croisement haussier (MACD passe au-dessus de sa ligne de signal)."""
+    if sig["vol24"] < cfg.MIN_VOL24_USD: return False
+    if None in (sig["macd"], sig["macd_sig"], sig["macd_prev"], sig["sig_prev"]): return False
+    return sig["macd_prev"] <= sig["sig_prev"] and sig["macd"] > sig["macd_sig"]
+
+
+def _entry_bb(sig, close, cfg) -> bool:
+    """Bollinger : achat sous la bande inférieure (retour à la moyenne)."""
+    if sig["vol24"] < cfg.MIN_VOL24_USD:      return False
+    if sig["bb_mid"] is None:                 return False
+    return close < sig["bb_mid"] - cfg.BB_K * sig["bb_std"]
+
+
+def _entry_ema(sig, close, cfg) -> bool:
+    """EMA cross : croisement haussier (EMA rapide passe au-dessus de l'EMA lente)."""
+    if sig["vol24"] < cfg.MIN_VOL24_USD: return False
+    f, s = cfg.EMA_FAST, cfg.EMA_SLOW
+    ef, es   = sig["ema"][f], sig["ema"][s]
+    efp, esp = sig["ema_prev"][f], sig["ema_prev"][s]
+    if None in (ef, es, efp, esp): return False
+    return efp <= esp and ef > es
 
 
 def run(symbol: str, candles: list, cfg, signals=None, start=None, end=None, entry_fn=None) -> dict:
