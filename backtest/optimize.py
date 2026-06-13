@@ -22,9 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as C
 from backtester import load_candles, precompute_signals, run
 
-SYMBOLS     = ["BONKUSDT", "WIFUSDT"]
+SYMBOLS     = sys.argv[1:] if len(sys.argv) > 1 else ["BONKUSDT", "WIFUSDT"]
 SPLIT_RATIO = 0.70
-MIN_TRADES  = 40          # seuil de significativité (combiné BONK+WIF, in-sample)
+MIN_TRADES  = 40          # seuil de significativité (combiné, in-sample)
 
 # ─── Grille de paramètres à fort levier ──────────────────────────────
 GRID = {

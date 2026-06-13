@@ -73,8 +73,9 @@ def save_csv(symbol: str, rows: list) -> str:
 
 def main():
     months = int(sys.argv[1]) if len(sys.argv) > 1 else 6
+    symbols = sys.argv[2:] if len(sys.argv) > 2 else SYMBOLS
     print(f"=== Telechargement {INTERVAL} sur ~{months} mois ===")
-    for symbol in SYMBOLS:
+    for symbol in symbols:
         print(f"-> {symbol}")
         rows = fetch_symbol(symbol, months)
         if not rows:
