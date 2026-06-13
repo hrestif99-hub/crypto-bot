@@ -51,7 +51,7 @@ def make_cfg(**ov):
 
 def combined(data, cfg, lo, hi):
     tot_pnl = tot_tr = wins = 0
-    for sym in SYMBOLS:
+    for sym in data:
         candles, sigs, split = data[sym]
         m = run(sym, candles, cfg, signals=sigs, start=lo(split), end=hi(split),
                 entry_fn=_entry_meanrev)
@@ -63,7 +63,11 @@ def main():
     print("=== MEAN-REVERSION — chargement + pre-calcul ===")
     data = {}
     for sym in SYMBOLS:
-        candles = load_candles(sym)
+        try:
+            candles = load_candles(sym)
+        except FileNotFoundError:
+            print(f"  {sym}: absent, ignoré")
+            continue
         data[sym] = (candles, precompute_signals(candles), int(len(candles) * SPLIT_RATIO))
         print(f"  {sym}: {len(candles):,} bougies")
 

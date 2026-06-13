@@ -54,9 +54,9 @@ def make_cfg(**overrides):
 
 
 def combined(data, cfg, lo, hi):
-    """Somme BONK+WIF sur la tranche [lo, hi)."""
+    """Somme sur tout le panel chargé, tranche [lo, hi)."""
     tot_pnl = tot_tr = wins = 0
-    for sym in SYMBOLS:
+    for sym in data:
         candles, sigs, split = data[sym]
         m = run(sym, candles, cfg, signals=sigs, start=lo(split), end=hi(split))
         tot_pnl += m["pnl_usdc"]
@@ -70,11 +70,15 @@ def main():
     print("=== Chargement + pré-calcul des indicateurs (une fois) ===")
     data = {}
     for sym in SYMBOLS:
-        candles = load_candles(sym)
+        try:
+            candles = load_candles(sym)
+        except FileNotFoundError:
+            print(f"  {sym}: absent, ignoré")
+            continue
         sigs = precompute_signals(candles)
         split = int(len(candles) * SPLIT_RATIO)
         data[sym] = (candles, sigs, split)
-        print(f"  {sym}: {len(candles):,} bougies, split @ {split:,}")
+        print(f"  {sym}: {len(candles):,} bougies")
 
     IN  = (lambda s: None, lambda s: s)   # [WARMUP, split)
     OUT = (lambda s: s,    lambda s: None) # [split, fin)
