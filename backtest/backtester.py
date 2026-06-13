@@ -132,6 +132,18 @@ def _sma_std_series(values, period=20):
     return sma, std
 
 
+def _sma_series(values, period):
+    out = [None] * len(values)
+    s = 0.0
+    for i, v in enumerate(values):
+        s += v
+        if i >= period:
+            s -= values[i - period]
+        if i >= period - 1:
+            out[i] = s / period
+    return out
+
+
 def precompute_signals(candles: list) -> list:
     """Pré-calcule TOUS les indicateurs par bougie — INDÉPENDANT des params.
     Renvoie un dict par bougie (None tant que pas assez d'historique).
@@ -146,6 +158,7 @@ def precompute_signals(candles: list) -> list:
     rsi = _rsi_series(closes, 14)
     sma20, std20 = _sma_std_series(closes, 20)
     emap = {p: _ema_series(closes, p) for p in (9, 21, 50, 200)}
+    smap = {p: _sma_series(closes, p) for p in (3, 6, 9, 12, 24, 48)}
 
     sigs = [None] * n
     for i in range(288, n):                 # 288 = warmup complet (vol24 sur 24h)
@@ -160,6 +173,8 @@ def precompute_signals(candles: list) -> list:
             "bb_mid": sma20[i], "bb_std": std20[i],
             "ema":      {p: emap[p][i]     for p in emap},
             "ema_prev": {p: emap[p][i - 1] for p in emap},
+            "sma":      {p: smap[p][i]     for p in smap},
+            "sma_prev": {p: smap[p][i - 1] for p in smap},
         }
     return sigs
 
@@ -211,6 +226,18 @@ def _entry_ema(sig, close, cfg) -> bool:
     efp, esp = sig["ema_prev"][f], sig["ema_prev"][s]
     if None in (ef, es, efp, esp): return False
     return efp <= esp and ef > es
+
+
+def _entry_sma_rsi(sig, close, cfg) -> bool:
+    """SMA courte croise SMA longue À LA HAUSSE + confirmation RSI (>= seuil).
+    La stratégie 'SMA court / SMA long + RSI' des tutos court-terme."""
+    if sig["vol24"] < cfg.MIN_VOL24_USD: return False
+    f, s = cfg.SMA_FAST, cfg.SMA_SLOW
+    sf, ss   = sig["sma"][f], sig["sma"][s]
+    sfp, ssp = sig["sma_prev"][f], sig["sma_prev"][s]
+    if None in (sf, ss, sfp, ssp, sig["rsi"]): return False
+    cross_up = sfp <= ssp and sf > ss
+    return cross_up and sig["rsi"] >= cfg.RSI_MIN
 
 
 def run(symbol: str, candles: list, cfg, signals=None, start=None, end=None, entry_fn=None) -> dict:
